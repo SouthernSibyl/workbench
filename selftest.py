@@ -264,6 +264,15 @@ threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.3}, daemon
 time.sleep(0.6)
 base = "http://127.0.0.1:39411"
 
+# 没有模型的环境里，上面第 10 节整段被 `ai.ai_ready` 跳过，当天简报从来没人生成过 ——
+# 而这里也没启后台 worker（自测只起 serve_forever）。不先补一份兜底简报的话，
+# 下面「状态含简报条目」永远是 0 条。而且这条**只在别人机器上复现**：
+# 作者自己配了模型，第 10 节跑过、缓存已经在了，所以看着是绿的。
+if not store.read_cache(f"daily-{TODAY}"):
+    print("  --   当天还没有简报缓存，先按无模型路径兜底生成一份")
+    ai.build_daily(cfg, calendar_cn.today_context(None, cfg.get("anniversaries") or []),
+                   force=True, wx=None)
+
 
 def get(path, data=None):
     req = urllib.request.Request(base + path)
@@ -452,17 +461,23 @@ check("三路并发的同步只放一路进", sum(1 for v in _res.values()
 
 _snap = photos._load_index()
 try:
-    _t0 = (_now - datetime.timedelta(seconds=5)).isoformat(timespec="seconds")
-    _other = {"id": "_selftest_other", "file": "_selftest_other.jpg", "src": "test",
-              "addedAt": _now.isoformat(timespec="seconds")}
-    store.write_cache("photos", _snap + [_other])
-    _doomed = _snap[0]
-    photos._save_index(_snap[1:], newer_than=_t0)
+    # 用**自己造的**时间戳，不依赖「图库里的图是什么时候下下来的」。
+    # 原来拿图库第一条当淘汰对象、用 now-5s 当基准 —— 在全新环境里图库是刚
+    # 同步下来的，所有条目的 addedAt 都晚于 now-5s，于是"该被淘汰的"又被当成
+    # 「别处新入库的」并了回来。同样是只在别人机器上复现的假失败。
+    _t0 = _now.isoformat(timespec="seconds")
+    _doomed = {"id": "_selftest_doomed", "file": "_selftest_doomed.jpg",
+               "src": "test", "addedAt": "2000-01-01T00:00:00"}      # 老条目
+    _other = {"id": "_selftest_other", "file": "_selftest_other.jpg",
+              "src": "test", "addedAt": _t0}                          # 本轮开始的那一刻
+    store.write_cache("photos", _snap + [_doomed, _other])
+    photos._save_index(_snap, newer_than=_t0)
     _after = photos._load_index()
-    _ids = {i.get("id") for i in _after}
+    _ids = {i.get("id") or i.get("file") for i in _after}   # 老条目可能没有 id
     check("并回别处刚入库的条目", "_selftest_other" in _ids)
-    check("自己淘汰的条目真删了", _doomed.get("id") not in _ids)
-    check("条数 = 保留 + 并回", len(_after) == len(_snap), f"{len(_snap)} -> {len(_after)}")
+    check("自己没保留的条目真删了", "_selftest_doomed" not in _ids)
+    check("条数 = 原库 + 并回的那条", len(_after) == len(_snap) + 1,
+          f"{len(_snap)} -> {len(_after)}")
 finally:
     store.write_cache("photos", _snap)
 
