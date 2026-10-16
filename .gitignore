@@ -1,0 +1,34 @@
+# ---- 构建产物 ----
+dist/
+build/pyi/
+build/*.spec.bak
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# ---- 编辑器 / IDE ----
+.vscode/
+.idea/
+*.swp
+
+# ---- 系统 ----
+Thumbs.db
+desktop.ini
+
+# ---- 运行期数据（正常都在 %APPDATA%\Workbench，别放进仓库）----
+config.json
+cache/
+art/
+browser/
+instance.lock
+instance.port
+workbench.log
+
+# ---- 开发过程留档 ----
+docs/shots-local/
+*.bak

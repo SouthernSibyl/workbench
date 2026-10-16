@@ -1,0 +1,11 @@
+# 仓库里统一用 LF —— 不然 Windows 上提交会把整个文件变成 CRLF，
+# 每次改动都显示为「全文修改」，diff 没法看。
+* text=auto eol=lf
+
+# 二进制，别做换行转换
+*.png binary
+*.ico binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.exe binary
