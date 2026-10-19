@@ -604,8 +604,13 @@ try:
     _t = time.time()
     _fast = ai.build_prompt(cfg, ctx, _wx.peek(cfg), fast=True)
     _ms = (time.time() - _t) * 1000
-    check("fast 模式不重抓资讯（走旧池）", len(_pool_calls) == 0, f"{len(_pool_calls)} 次抓取")
-    check("fast 模式够快", _ms < 2000, f"{_ms:.0f} ms")
+    # ⚠️ 这里不能断言 `len(_pool_calls) == 0`：allow_stale 的设计就是
+    # 「先把旧池给你，重抓丢到后台」，后台线程随时可能开始抓 —— 断言零次必然是有竞态的。
+    # 真正要保证的是：fast 路径**没有等**抓取，而且拿到的是旧池。
+    check("fast 模式没等抓取（不阻塞请求路径）", _ms < 2000, f"{_ms:.0f} ms")
+    check("fast 模式给的是旧池（重抓走后台）",
+          bool(_fast["pool"]) and "过期的探针条目" in str(_fast["pool"][0].get("title") or ""),
+          f"{len(_pool_calls)} 次后台抓取（异步，不计较）")
     check("fast 模式仍给出候选池", len(_fast["pool"]) >= 1, len(_fast["pool"]))
 
     # 非 fast（真生成简报）时必须重抓
@@ -673,6 +678,97 @@ check("命中的是天文相关内容",
 _ch2 = photos.choose_daily(cfg, ctx, _wx.peek(cfg))
 check("第二次直接吃缓存", _ch2.get("cached") is True)
 check("缓存键带时段", bool(_ch.get("slot")), _ch.get("slot"))
+
+print("=== 17b. 壁纸轮换（曾经连着 4 天全是同一张）===")
+# 事故复盘：`pick()` 原来是「取分数最高的那张」。听起来合理，实际结果是
+# 连续 4 天、昼/夜共 7 个时段墙上都是同一张 —— 它的属性恰好每场都命中，
+# 基础分甩开别人一大截，写了 0~0.8 的哈希抖动也救不回来。
+# 现在改成「先按 7 天冷却筛，再在够好的里面按（日期+时段）加权抽签」。
+_hist: list = []
+_rows: list = []
+_d0 = datetime.date(2026, 12, 1)
+for _d in range(4):
+    _day = _d0 + datetime.timedelta(days=_d)
+    for _slot in ("夜", "昼"):
+        _sc = {"iso": _day.isoformat(), "slot": _slot,
+               "slotCn": "夜里" if _slot == "夜" else "白天",
+               "时段": ["夜晚"] if _slot == "夜" else ["正午"],
+               "天气": [], "季节": ["秋"], "事件": [],
+               "偏好": list((cfg.get("photos") or {}).get("likes") or []),
+               "festival": "", "weatherText": ""}
+        _got = photos.pick(cfg, {"iso": _sc["iso"], "season": "秋"}, {},
+                           limit=3, scene=_sc, history=_hist)
+        if _got:
+            _rows.append((_sc["iso"], _slot, _got[0]))
+            _hist.append({"d": _sc["iso"], "slot": _slot, "file": _got[0]["file"]})
+
+check("轮换：4 天 8 个时段拿到了不同图",
+      len({m["file"] for _i, _s, m in _rows}) >= 4,
+      f"{len({m['file'] for _i, _s, m in _rows})} 种 / {len(_rows)} 次")
+_gap: list = []
+_pairs: dict = {}
+for _iso, _slot, _m in _rows:
+    _pairs.setdefault(_m["file"], []).append(
+        datetime.date.fromisoformat(_iso).toordinal())
+for _f, _os in _pairs.items():
+    _os.sort()
+    for _a, _b in zip(_os, _os[1:]):
+        if _b - _a < photos.REPEAT_DAYS:
+            _gap.append(f"{_f}: {_b - _a} 天")
+check(f"轮换：同一张两次使用间隔 >= {photos.REPEAT_DAYS} 天", not _gap, _gap)
+check("轮换：同一天的昼与夜不是同一张",
+      all(a != b for (i1, _s1, a), (i2, _s2, b) in zip(_rows[::2], _rows[1::2])
+          if i1 == i2))
+_seed_scene = {"iso": "2026-12-02", "slot": "夜", "slotCn": "夜里", "时段": ["夜晚"],
+               "天气": [], "季节": ["秋"], "事件": [],
+               "偏好": list((cfg.get("photos") or {}).get("likes") or []),
+               "festival": "", "weatherText": ""}
+check("轮换：同一天同一时段是稳定的（刷新页面不乱跳）",
+      photos.pick(cfg, {}, {}, limit=1, scene=_seed_scene, history=[])[0]["file"]
+      == photos.pick(cfg, {}, {}, limit=1, scene=_seed_scene, history=[])[0]["file"])
+check("轮换：没有缓存时 peek_chosen 返回 None",
+      photos.peek_chosen(cfg, {"iso": "1999-01-01", "season": "春"}, {}) is None)
+
+# record_use 会写真实缓存 —— 存一份、测完还原，别污染用户的历史
+_hist_backup = store.read_cache(photos.HISTORY_KEY)
+try:
+    photos.record_use({"iso": "2000-01-01", "slot": "夜"}, "_selftest_a.jpg", "测试A")
+    photos.record_use({"iso": "2000-01-01", "slot": "夜"}, "_selftest_b.jpg", "测试B")
+    _h = photos._load_history()
+    _same = [r for r in _h if r.get("d") == "2000-01-01" and r.get("slot") == "夜"]
+    check("轮换：同一天同一时段只留最后一条",
+          len(_same) == 1 and _same[0].get("file") == "_selftest_b.jpg", _same)
+    check("轮换：历史记录了日期与时段",
+          bool(_same) and _same[0].get("d") == "2000-01-01" and _same[0].get("slot") == "夜")
+finally:
+    store.write_cache(photos.HISTORY_KEY, _hist_backup or [])
+
+print("=== 17c. 每日一句：介绍壁纸，而不是万能励志句 ===")
+# 原来没模型时用的是「把一件小事做到今天的极限」这类句子，跟墙上那张图毫无关系。
+_wp0 = _rows[0][2] if _rows else None
+if _wp0:
+    _q0, _src0 = ai.wallpaper_quote(_wp0, {"season": "秋", "dateText": "2026年12月1日"},
+                                    {"ok": True, "text": "晴", "temp": 18})
+    check("每日一句提到了这张图", ("今天这张" in _q0) or ("画面是" in _q0), _q0[:36])
+    check("每日一句比原来的 15-40 字明显长", len(_q0) >= 45, f"{len(_q0)} 字")
+_q_non, _ = ai.wallpaper_quote(None, {"season": "秋"}, {})
+check("没有壁纸时兜底不崩", len(_q_non) > 10, _q_non[:30])
+_pl = ai.build_prompt(
+    cfg, {"iso": "2026-12-01", "dateText": "2026年12月1日", "weekday": "星期一",
+          "season": "秋", "festival": ""},
+    {"ok": True, "city": "北京市", "text": "晴", "temp": 12, "phase": "正午"},
+    fast=True, wallpaper=_wp0)
+check("提示词里带上了「今天墙上这张照片」", "今天墙上这张照片" in _pl["user"])
+check("提示词要求 80-140 字", "80-140" in _pl["user"])
+check("提示词不再要求 15-40 字短句", "15-40 字" not in _pl["user"])
+# 壁纸按时段会换、句子一天只写一次 —— 靠 quoteFor 判断这句说的是哪张图，
+# 对不上就后台重写（见 main._maybe_refresh_quote）
+check("只重写一句的提示词也带壁纸",
+      "今天墙上这张照片" in ai.quote_prompt(cfg, {"dateText": "2026年12月1日"}, {}, _wp0)[1])
+_fd = ai._fallback_daily({"dateText": "2026年12月1日", "season": "秋"},
+                         {"ok": True, "city": "北京市", "text": "晴"}, _wp0)
+check("兜底句记下了「描述的是哪张图」",
+      _fd.get("quoteFor") == (_wp0 or {}).get("file"), _fd.get("quoteFor"))
 
 print("=== 18. 可自选文件的启动项 ===")
 _fs = actions.list_dir("")

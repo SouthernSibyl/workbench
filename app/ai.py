@@ -18,6 +18,7 @@ from concurrent.futures import ThreadPoolExecutor as _TPE
 
 import store
 import sources
+import photos
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
@@ -336,19 +337,101 @@ def _extract_json(text: str) -> dict:
 
 # ------------------------------------------------------------------ 兜底内容
 
-_FALLBACK_QUOTES = [
-    ("把一件小事做到今天的极限，明天它会替你说话。", "工作台"),
-    ("慢一点没关系，只要方向没歪。", "工作台"),
-    ("今天比昨天多懂一点点，就够了。", "工作台"),
-    ("先做五分钟，剩下的交给惯性。", "工作台"),
-    ("把工具磨快，比用力气更值得。", "工作台"),
-]
+# 这里原来有一组「把一件小事做到今天的极限」之类的万能励志句，无模型时轮流用。
+# 已经删掉：它们跟墙上那张照片毫无关系，而每日一句现在要介绍壁纸
+# （见 wallpaper_quote）。
 
 
-def _fallback_daily(ctx: dict, wx: dict | None = None) -> dict:
+_WP_LAYER_ORDER = ("事件", "题材", "天气", "时段", "季节", "构图")
+
+
+def _is_cjk_heavy(text: str) -> bool:
+    if not text:
+        return False
+    cjk = len(re.findall(r"[\u4e00-\u9fff]", text))
+    return cjk >= max(8, len(text) * 0.25)
+
+
+def wallpaper_block(wp: dict | None) -> str:
+    """把「今天选中的那张壁纸」写成一段给模型看的信息。没有就返回空串。"""
+    if not wp:
+        return "（今天还没选出壁纸）"
+    a = wp.get("attrs") or {}
+    lines = [f"标题：{wp.get('title') or '（无标题）'}",
+             f"来源：{wp.get('credit') or wp.get('src') or '未知'}"]
+    tags = []
+    for layer in _WP_LAYER_ORDER:
+        vals = [str(x) for x in (a.get(layer) or []) if x]
+        if vals:
+            tags.append(f"{layer} {'/'.join(vals[:2])}")
+    if tags:
+        lines.append("属性：" + "；".join(tags))
+    desc = re.sub(r"\s+", " ", str(wp.get("desc") or "")).strip()
+    if desc:
+        lines.append(f"原图说明：{desc[:200]}")
+    if wp.get("why"):
+        lines.append(f"为什么挑它：{wp['why']}")
+    return "\n".join(lines)
+
+
+def wallpaper_quote(wp: dict | None, ctx: dict, wx: dict | None = None) -> tuple[str, str]:
+    """没有模型时，用壁纸自身的信息写一段介绍。
+
+    以前这里用的是「把一件小事做到今天的极限」这种万能励志句 ——
+    跟墙上那张照片毫无关系。现在至少能说清「这是哪儿、拍的是什么」。
+    """
+    wx = wx or {}
+    if not wp:
+        return ("今天的壁纸还没选出来 —— 图库是空的，或者这会儿正在抓图。"
+                "先看一眼窗外，今天的光也挺好。"), "工作台"
+    a = wp.get("attrs") or {}
+    title = str(wp.get("title") or "").strip()
+    desc = re.sub(r"\s+", " ", str(wp.get("desc") or "")).strip()
+    credit = str(wp.get("credit") or "").strip()
+
+    parts: list[str] = []
+    if title:
+        parts.append(f"今天这张是《{title.rstrip('？?')}》")
+    if _is_cjk_heavy(desc):
+        parts.append(desc[:120].rstrip("。；;，,、 "))
+    else:
+        # 英文图源（ESA/NASA）的说明是英文，硬塞进中文句子里很别扭，
+        # 改用属性说清它是什么
+        feats = []
+        for layer in ("事件", "题材", "天气", "时段", "季节"):
+            vals = [str(x) for x in (a.get(layer) or []) if x]
+            if vals:
+                feats.append("/".join(vals[:2]))
+        if feats:
+            parts.append("画面是" + "、".join(feats))
+        if title:
+            parts[0] = f"今天这张来自 {credit or '天文图源'}，标题就叫《{title}》"
+
+    tail = ""
+    if wx.get("ok") and wx.get("text"):
+        tail = f"外面是{wx.get('text','')}"
+        if wx.get("temp") is not None:
+            tail += f"、{wx['temp']}°C"
+        tail += "，看它正合适。"
+    elif ctx.get("season"):
+        tail = f"{ctx['season']}天里看它正合适。"
+
+    q = "。".join(p for p in parts if p)
+    q = re.sub(r"[。；]{2,}", "。", q) + "。" + tail
+    return q.strip(), credit or "工作台"
+
+
+def _quote_for(wp: dict | None) -> str:
+    """这句描述的是哪张图 —— 壁纸按时段换了要拿它比对。"""
+    return str((wp or {}).get("file") or "")
+
+
+def _fallback_daily(ctx: dict, wx: dict | None = None,
+                    wallpaper: dict | None = None) -> dict:
     """没有模型时的兜底文案。会尽量用上天气与节气，别让它显得空。"""
-    idx = _dt.date.today().toordinal() % len(_FALLBACK_QUOTES)
-    q, src = _FALLBACK_QUOTES[idx]
+    # 以前这里是「把一件小事做到今天的极限」这类万能励志句，跟墙上那张照片毫无关系。
+    # 现在改成照着当天选中的壁纸写，至少说的是「这张拍的是什么」。
+    q, src = wallpaper_quote(wallpaper, ctx, wx)
     fes = ctx.get("festival") or ""
     wx = wx or {}
 
@@ -382,6 +465,7 @@ def _fallback_daily(ctx: dict, wx: dict | None = None) -> dict:
     return {
         "quote": q,
         "quoteFrom": src,
+        "quoteFor": _quote_for(wallpaper),
         "recommend": {"title": title, "detail": detail, "action": ""},
         "tags": [],
         "generatedBy": "local",
@@ -399,6 +483,9 @@ SYSTEM_PROMPT = (
 
 USER_TEMPLATE = """今天是 {date}（{weekday}）{festival_line}{weather_line}。
 
+【今天墙上这张照片】
+{wallpaper_block}
+
 【使用者最近的活动痕迹】
 {brief_signals}
 
@@ -408,8 +495,8 @@ USER_TEMPLATE = """今天是 {date}（{weekday}）{festival_line}{weather_line}�
 请输出如下 JSON：
 
 {{
-  "quote": "一句 15-40 字的中文短句，写给今天，可以呼应天气或节气，克制、具体",
-  "quoteFrom": "来源或空字符串",
+  "quote": "介绍上面【今天墙上这张照片】：80-140 字，两到三句。说清它拍的是什么现象或风景（地名 / 天体 / 地貌 / 天气），为什么值得看；可以顺一句它和今天天气或时令的呼应。不要写成景点广告，不要喊口号，不要用「震撼」「绝美」「治愈」这类词",
+  "quoteFrom": "这张图的出处（摄影师或机构，照上面「来源」写；没有就留空字符串）",
   "recommend": {{
     "title": "一件今天值得做的事，12 字以内",
     "detail": "一到两句话说明为什么是今天、怎么做，40-80 字",
@@ -439,7 +526,11 @@ USER_TEMPLATE = """今天是 {date}（{weekday}）{festival_line}{weather_line}�
 4. 候选里没有的标题、链接一律不得出现。宁可少写几条。
 5. why 必须是一句**通顺完整的中文**，说清「这条和这位使用者的哪件事有关」；
    不要出现语义不通的词语拼接，写不出来就留空字符串。
-6. 绝对不写娱乐、明星、综艺、影视、体育赛事内容。"""
+6. 绝对不写娱乐、明星、综艺、影视、体育赛事内容。
+7. **quote 必须围绕「今天墙上这张照片」写**，不要写成泛泛的天气感慨或励志短句。
+   长度 80-140 字。素材不够就写得概括些，但**不得编造**地名、年代、物种、摄影师，
+   也不要替换拍摄设备或机构（望远镜、卫星、天文台一律照「来源」那一栏写）。
+   只依据上面给出的标题、原图说明和属性来写。"""
 
 EXPAND_SYSTEM = (
     "你是一个中文编辑，给新闻写「简述」。只输出正文，不要标题、不要 markdown 标记、"
@@ -480,12 +571,89 @@ def per_item_chars(cfg: dict) -> int:
     return max(220, read_budget(cfg) // n)
 
 
+QUOTE_SYSTEM = (
+    "你是一个中文图片编辑。你只输出 JSON，不要解释、不要 markdown 代码块。"
+    "风格：具体、克制，不用 emoji，不喊口号，不写「震撼」「绝美」「治愈」这类词。"
+)
+
+QUOTE_TEMPLATE = """今天是 {date}（{weekday}）{festival_line}{weather_line}。
+
+【今天墙上这张照片】
+{wallpaper_block}
+
+请为这张照片写一句中文介绍，输出 JSON：
+
+{{
+  "quote": "80-140 字，两到三句。说清它拍的是什么现象或风景（地名 / 天体 / 地貌 / 天气），为什么值得看；可以顺一句它和今天天气或时令的呼应",
+  "quoteFrom": "这张图的出处（摄影师或机构，照上面「来源」写；没有就留空字符串）"
+}}
+
+硬性要求：
+1. 只依据上面给出的标题、原图说明和属性来写，**不得编造**地名、年代、物种、摄影师。
+2. 拍摄设备与机构（望远镜、卫星、天文台）一律照「来源」那一栏写，不要替换。
+3. 不要写成景点广告，不要复述标题。"""
+
+
+def _weather_line(wx: dict | None) -> str:
+    """提示词里那句天气。API 模式与「只重写一句」共用。"""
+    if not (wx and wx.get("ok")):
+        return ""
+    temp = f"、{wx.get('temp')}°C" if wx.get("temp") is not None else ""
+    return f"，{wx.get('city','')}{wx.get('text','')}{temp}，{wx.get('phase','')}"
+
+
+def quote_prompt(cfg: dict, ctx: dict, wx: dict | None,
+                 wallpaper: dict | None) -> tuple[str, str]:
+    user = QUOTE_TEMPLATE.format(
+        date=ctx.get("dateText") or ctx.get("iso") or "",
+        weekday=ctx.get("weekday") or "",
+        festival_line=f"，今天是{ctx['festival']}" if ctx.get("festival") else "",
+        weather_line=_weather_line(wx),
+        wallpaper_block=wallpaper_block(wallpaper),
+    )
+    return QUOTE_SYSTEM, user
+
+
+def refresh_quote(cfg: dict, ctx: dict, wx: dict | None = None,
+                  wallpaper: dict | None = None) -> bool:
+    """按「此刻墙上这张」重写每日一句。
+
+    为什么需要它：壁纸按时段（昼/夜/晨/昏）会换，而每日一句一天只生成一次 ——
+    不补的话就会出现「文字在讲冰岛的极光、墙上却是星系」这种对不上。
+    这个调用很小（只写一句话、不带资讯列表），一天最多补三四次。
+    """
+    if not wallpaper or not ai_ready(cfg):
+        return False
+    try:
+        system, user = quote_prompt(cfg, ctx, wx, wallpaper)
+        obj = _extract_json(chat(cfg, system, user, timeout=90, temperature=0.8))
+        quote = str(obj.get("quote") or "").strip()
+        if not quote:
+            return False
+        key = f"daily-{ctx['iso']}"
+        daily = store.read_cache(key) or {}
+        fields = daily.get("fields") or {}
+        fields["quote"] = quote[:400]
+        fields["quoteFrom"] = str(obj.get("quoteFrom") or "").strip()[:80]
+        fields["quoteFor"] = str(wallpaper.get("file") or "")
+        daily["fields"] = fields
+        store.write_cache(key, daily)
+        store.log(f"quote 已按新壁纸重写：{fields['quoteFor'][:18]}")
+        return True
+    except Exception as exc:
+        store.log(f"refresh_quote failed: {exc}")
+        return False
+
+
 def build_prompt(cfg: dict, ctx: dict, wx: dict | None = None,
-                 fast: bool = False) -> dict:
+                 fast: bool = False, wallpaper: dict | None = None) -> dict:
     """组装提示词（API 模式与网页版模式共用同一份）。
 
     `fast=True` 是给「界面点一下就要看到提示词」的路径用的：
     资讯池允许用旧的一版（后台再刷），不为了绝对最新让人干等十几秒。
+
+    `wallpaper` 是今天墙上那张图。每日一句要介绍它，所以得先选好壁纸再写提示词；
+    没传就只读缓存（不重算，免得给 /api/prompt 添几百毫秒）。
     """
     # 本机痕迹是隐私相关的，走 signals.enabled 开关（设置里可关）。
     # 关掉就整段不给模型看，也不去读浏览器历史 —— 不能只是「显示上隐藏」。
@@ -513,16 +681,16 @@ def build_prompt(cfg: dict, ctx: dict, wx: dict | None = None,
         for p in pool[:60]
     ) or "（抓取失败或没有配置资讯源）"
 
-    weather_line = ""
-    if wx and wx.get("ok"):
-        weather_line = (f"，{wx.get('city','')}{wx.get('text','')}"
-                        f"{('、' + str(wx.get('temp')) + '°C') if wx.get('temp') is not None else ''}"
-                        f"，{wx.get('phase','')}")
+    weather_line = _weather_line(wx)
+
+    if wallpaper is None:
+        wallpaper = photos.peek_chosen(cfg, ctx, wx)
 
     user = USER_TEMPLATE.format(
         date=ctx["dateText"], weekday=ctx["weekday"],
         festival_line=f"，今天是{ctx['festival']}" if ctx.get("festival") else "",
         weather_line=weather_line,
+        wallpaper_block=wallpaper_block(wallpaper),
         brief_signals=sig_text, pool=pool_text, pool_count=len(pool), count=count,
     )
     return {
@@ -625,8 +793,10 @@ def _merge_model_json(payload: dict, obj: dict, pool: list[dict], count: int) ->
     if isinstance(obj.get("quote"), str) and obj["quote"].strip():
         rec = obj.get("recommend")
         fields = {
-            "quote": obj["quote"].strip()[:160],
-            "quoteFrom": str(obj.get("quoteFrom") or "").strip()[:40],
+            "quote": obj["quote"].strip()[:400],
+            "quoteFrom": str(obj.get("quoteFrom") or "").strip()[:80],
+            # 别丢：用它判断这句描述的是哪张壁纸（壁纸按时段会换）
+            "quoteFor": fields.get("quoteFor") or "",
             "recommend": rec if isinstance(rec, dict) else fields.get("recommend") or {},
             "tags": [str(t).strip()[:20] for t in (obj.get("tags") or []) if str(t).strip()][:8],
             "generatedBy": "ai",
@@ -698,14 +868,23 @@ def build_daily(cfg: dict, ctx: dict, force: bool = False,
                 and ((cached.get("news") or {}).get("items") or [])):
             return cached
 
-    prompt = build_prompt(cfg, ctx, wx)
+    # 先把今天这面墙定下来，再写提示词 —— 每日一句要介绍这张图。
+    # 选图本身只用本地打分，不依赖模型，所以可以放在前面。
+    try:
+        _chosen = photos.choose_daily(cfg, ctx, wx)
+        wp = (_chosen or {}).get("main")
+    except Exception as _exc:
+        store.log(f"build_daily: 选壁纸失败，跳过壁纸介绍（{_exc}）")
+        wp = None
+
+    prompt = build_prompt(cfg, ctx, wx, wallpaper=wp)
     pool = prompt["pool"]
     count = prompt["count"]
     per = per_item_chars(cfg)
 
     payload: dict = {
         "date": ctx["iso"],
-        "fields": _fallback_daily(ctx, wx),
+        "fields": _fallback_daily(ctx, wx, wp),
         "news": {"brief": "", "items": _fallback_items(pool, count),
                  "poolSize": len(pool), "source": "local"},
         "tags": [],

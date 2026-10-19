@@ -411,11 +411,14 @@ body {
 
 .mid-spacer { flex: 1 1 auto; min-height: 0; }
 
-.quote-float { flex: 0 0 auto; max-width: 720px; margin-bottom: 16px; }
+.quote-float { flex: 0 0 auto; max-width: 780px; margin-bottom: 16px; }
+/* 每日一句现在是一段介绍壁纸的短文（80-140 字，两三句），
+   所以字号从 26px 降到 20px、行高拉开到 1.8 —— 26px 时三行会顶到上方部件。 */
 .quote {
   font-family: var(--serif);
-  font-size: 26px; line-height: 1.66; letter-spacing: 1.2px;
+  font-size: 20px; line-height: 1.8; letter-spacing: .4px;
   color: #fff;
+  text-wrap: pretty;
   text-shadow: 0 2px 8px rgba(0, 0, 0, .55), 0 8px 30px rgba(0, 0, 0, .45);
 }
 .quote-from {

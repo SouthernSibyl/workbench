@@ -18,6 +18,7 @@ import hashlib
 import html
 import json
 import os
+import random
 import re
 import ssl
 import struct
@@ -808,6 +809,110 @@ def _item_attrs(item: dict) -> dict:
     return out
 
 
+# ------------------------------------------------------- 轮换：别老是同一张
+
+# 教训：这一版之前，`pick()` 是「取分数最高的那张」。听起来很合理，实际结果是
+# **连续 4 天、昼/夜共 7 个时段，墙上始终是同一张图** —— 因为那张的属性恰好
+# 每一场都命中（天象+极光+秋），基础分 9.4 甩开别人一大截。
+# 原来其实写了个「跨天轮换」的哈希抖动，但幅度只有 0~0.8，纯属杯水车薪。
+#
+# 现在改成两步：
+#   ① 按分数筛出一个「够好」的候选池（分数不低于冠军的 82%）
+#   ② 在池子里按「日期 + 时段」做**确定性加权抽签** —— 好图更常被选中，
+#      但每次都会换；同一天同一时段又是稳定的（刷新页面不会乱跳）
+# 再加一条硬规则：REPEAT_DAYS 天内用过的图直接不进池子。
+
+HISTORY_KEY = "wallpaper-history"
+REPEAT_DAYS = 7        # 这么多天内不重复用同一张
+POOL_RATIO = 0.82      # 候选池门槛：分数不低于这批里最高的这个比例
+POOL_MIN = 12          # 池子至少留这么多张（分数两头分化时别缩成一两张）
+POOL_MAX = 40          # 池子最多这么多张，别把明显不搭的也卷进来
+_HISTORY_KEEP = 160    # 历史最多留这么多条（约一个多月）
+
+
+def _bootstrap_history() -> list[dict]:
+    """老版本没有轮换历史 —— 从已有的 `wallpaper-<日期>-<时段>.json` 缓存里补建一份。
+
+    不做这件事的话，升级后第一次挑图不知道「哪些最近刚用过」，很可能又挑到
+    昨天那张（正是用户抱怨的现象）。
+    """
+    try:
+        cdir = store.cache_path(HISTORY_KEY).parent
+        out: list[dict] = []
+        for p in sorted(cdir.glob("wallpaper-*.json"))[-40:]:
+            stem = p.stem[len("wallpaper-"):]
+            if "-" not in stem:
+                continue
+            iso, slot = stem.rsplit("-", 1)
+            try:
+                data = json.loads(p.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            main = ((data or {}).get("main") or {}) if isinstance(data, dict) else {}
+            if main.get("file"):
+                out.append({"d": iso, "slot": slot, "file": main["file"],
+                            "title": str(main.get("title") or "")[:60],
+                            "at": str((data or {}).get("computedAt") or "")})
+        if out:
+            store.write_cache(HISTORY_KEY, out[-_HISTORY_KEEP:])
+            store.log(f"wallpaper-history: 从 {len(out)} 个旧壁纸缓存补建了轮换历史")
+        return out[-_HISTORY_KEEP:]
+    except Exception:
+        return []
+
+
+def _load_history() -> list[dict]:
+    data = store.read_cache(HISTORY_KEY)
+    if isinstance(data, list):
+        return [x for x in data if isinstance(x, dict)]
+    return _bootstrap_history()
+
+
+def _last_used(history: list[dict]) -> dict[str, str]:
+    """file -> 最近一次被用到的日期（ISO 字符串）。"""
+    out: dict[str, str] = {}
+    for rec in history:
+        f = str(rec.get("file") or "")
+        d = str(rec.get("d") or "")
+        if f and d and d > out.get(f, ""):
+            out[f] = d
+    return out
+
+
+def _days_since(iso: str, used: str) -> int:
+    try:
+        return (_dt.date.fromisoformat(iso) - _dt.date.fromisoformat(used)).days
+    except (ValueError, TypeError):
+        return 9999
+
+
+def record_use(scene: dict, file: str, title: str = "") -> None:
+    """记一笔「这天、这个时段用了这张」。同一天同一时段只保留最后一次。"""
+    if not file:
+        return
+    hist = _load_history()
+    key = (str(scene.get("iso") or ""), str(scene.get("slot") or ""))
+    hist = [r for r in hist if (str(r.get("d") or ""), str(r.get("slot") or "")) != key]
+    hist.append({"d": key[0], "slot": key[1], "file": file,
+                 "title": str(title)[:60],
+                 "at": _dt.datetime.now().isoformat(timespec="seconds")})
+    store.write_cache(HISTORY_KEY, hist[-_HISTORY_KEEP:])
+
+
+def peek_chosen(cfg: dict, ctx: dict, wx: dict | None = None) -> dict | None:
+    """只读缓存里「今天这个时段已经选好的那张」—— 给提示词用，不重算。"""
+    try:
+        sc = scene_of(cfg, ctx, wx)
+        cached = store.read_cache(f"wallpaper-{sc['iso']}-{sc['slot']}")
+        if isinstance(cached, dict) and cached.get("main"):
+            main = dict(cached["main"])
+            main["why"] = cached.get("why") or main.get("why") or ""
+            return main
+    except Exception:
+        pass
+    return None
+
+
 def _score(item: dict, scene: dict, cfg: dict,
            attrs: dict | None = None) -> tuple[float, dict]:
     """返回 (分数, 命中明细)。明细拿去给用户看「为什么选这张」。"""
@@ -849,9 +954,9 @@ def _score(item: dict, scene: dict, cfg: dict,
     elif item.get("src") in ("astro", "apod", "nasa"):
         s += 1.0                     # 望远镜实拍 / NASA 官方图，用户点名喜欢天文摄影
 
-    # 同一天内稳定、跨天轮换；同一时段内不会跳来跳去
-    seed = f"{item.get('id')}-{scene.get('iso')}-{scene.get('slot')}"
-    s += (int(hashlib.sha1(seed.encode()).hexdigest()[:6], 16) % 1000) / 1000 * 0.8
+    # 这里原来还有个「跨天轮换」的哈希抖动（0~0.8）。没用 —— 分差远大于 0.8，
+    # 结果就是同一张图连着赢了 4 天。轮换交给 `pick()` 里的候选池抽签，
+    # 打分只负责「这张贴不贴合当下的天气/时段/季节」。
     return s, hits
 
 
@@ -872,27 +977,72 @@ def _why_text(scene: dict, hits: dict) -> str:
 
 
 def pick(cfg: dict, ctx: dict, wx: dict, limit: int = 10,
-         scene: dict | None = None) -> list[dict]:
+         scene: dict | None = None, history: list[dict] | None = None) -> list[dict]:
+    """挑图：先按分数筛出「够好」的一池，再在池子里做确定性加权抽签。
+
+    为什么要抽签 —— 纯取最高分的话，一张属性刚好每场都命中的图会永远赢
+    （实测连续 4 天、昼/夜共 7 次全是同一张）。细节见上面「轮换」那段注释。
+
+    返回的第 1 条是主壁纸，其余是「按 N 换」用的备选。
+    """
     items = [i for i in _load_index() if (LIB_DIR / i.get("file", "")).exists()]
     if not items:
         return []
     sc = scene or scene_of(cfg, ctx, wx)
+    iso = str(sc.get("iso") or "")
+    slot = str(sc.get("slot") or "")
+
     # 属性只算一次：每条都要用于打分和展示，重复算的话几百条会明显变慢
     cache = {id(i): _item_attrs(i) for i in items}
-    scored = sorted(((_score(i, sc, cfg, cache[id(i)]), i) for i in items),
-                    key=lambda pair: pair[0][0], reverse=True)
+    rows = []
+    for i in items:
+        score, hits = _score(i, sc, cfg, cache[id(i)])
+        rows.append((score, hits, i, cache[id(i)]))
+    rows.sort(key=lambda r: r[0], reverse=True)
+
+    used = _last_used(history if history is not None else _load_history())
+
+    def age(it: dict) -> int:
+        d = used.get(str(it.get("file") or ""))
+        return _days_since(iso, d) if d else 9999
+
+    # ① 先把「最近没出现过」的捞出来 —— **轮换优先于分数**。
+    #    反过来先按分数划线会出问题：图库里的分数很挤（一大堆都是 5.0），
+    #    一旦冠军是 6.6，`6.6×0.82=5.41` 就把 5.0 的全挡在外面，池子空了，
+    #    只好退回「随便挑」，冷却期直接被破。
+    fresh = [r for r in rows if age(r[2]) >= REPEAT_DAYS]
+    if not fresh:     # 图库太小或全在冷却期：放宽到「只要不是今天用过的」
+        fresh = [r for r in rows if age(r[2]) >= 1]
+    if not fresh:     # 还是空：只能接受重复，总比没壁纸强
+        fresh = rows
+    # ② 在新鲜的里面再划一条「够好」的线（以这批里最高的为基准）
+    floor = fresh[0][0] * POOL_RATIO
+    pool = [r for r in fresh if r[0] >= floor][:POOL_MAX]
+    if len(pool) < POOL_MIN:
+        # 分数往往两头分化（要么 5.6 要么 4.2），按比例卡会把池子缩成一两张 ——
+        # 那样「轮换」就变成在这两张之间来回跳，等于没换。保底取前 POOL_MIN 张。
+        pool = fresh[:POOL_MIN]
+
+    # ② 确定性加权抽签：权重按「离分数线多远」平方 —— 好图更常被选中，但每次会换。
+    #    种子只跟日期和时段有关，所以同一天同一时段刷新页面不会乱跳。
+    rng = random.Random(f"{iso}|{slot}")
+    weights = [max(0.05, r[0] - floor) ** 2 + 0.05 for r in pool]
+    head = rng.choices(range(len(pool)), weights=weights, k=1)[0]
+    ordered = [pool[head]] + [r for k, r in enumerate(pool) if k != head]
+
     out = []
-    for (score, hits), i in scored[:limit]:
+    for score, hits, i, attrs in ordered[:limit]:
         out.append({
             "file": i["file"], "src": i["src"], "title": i.get("title", ""),
             "desc": (i.get("desc") or "")[:220], "credit": i.get("credit", ""),
             "url": f"/art/library/{i['file']}",
             "link": i.get("link") or i.get("url") or "",
             "tags": (i.get("tags") or [])[:10],
-            "attrs": {k: v for k, v in cache[id(i)].items() if k != "flat"},
+            "attrs": {k: v for k, v in attrs.items() if k != "flat"},
             "score": round(score, 2),
             "hits": hits,
             "why": _why_text(sc, hits),
+            "pool": len(pool),
         })
     return out
 
@@ -912,7 +1062,7 @@ def choose_daily(cfg: dict, ctx: dict, wx: dict | None = None,
             cached["cached"] = True
             return cached
 
-    cands = pick(cfg, ctx, wx or {}, limit=12, scene=scene)
+    cands = pick(cfg, ctx, wx or {}, limit=12, scene=scene, history=_load_history())
     main = cands[0] if cands else None
     payload = {
         "iso": scene["iso"],
@@ -927,6 +1077,8 @@ def choose_daily(cfg: dict, ctx: dict, wx: dict | None = None,
     }
     if main:
         store.write_cache(key, payload)
+        # 记一笔，下次（换时段 / 明天）就不会再挑到这张
+        record_use(scene, str(main.get("file") or ""), str(main.get("title") or ""))
     return payload
 
 

@@ -128,6 +128,41 @@ def _art_candidates(ctx: dict) -> dict:
     return out
 
 
+# 壁纸按时段（昼 / 夜 / 晨 / 昏）会换，但「每日一句」一天只生成一次。
+# 图换了就把那句重写一遍 —— 不补的话会出现「文字在讲冰岛的极光、墙上却是星系」。
+# 同一天同一时段同一张图只试一次，失败不重试（别把请求打爆）。
+_QUOTE_TRIED: set[str] = set()
+_QUOTE_LOCK = threading.Lock()
+
+
+def _maybe_refresh_quote(cfg: dict, ctx: dict, wx: dict | None,
+                         chosen: dict, daily: dict) -> None:
+    try:
+        main = (chosen or {}).get("main") or {}
+        f = str(main.get("file") or "")
+        if not f or not ai.ai_ready(cfg):
+            return
+        if ((daily or {}).get("fields") or {}).get("quoteFor") == f:
+            return                      # 这句描述的就是现在墙上这张，不用动
+        key = f"{ctx.get('iso')}|{chosen.get('slot')}|{f}"
+        with _QUOTE_LOCK:
+            if key in _QUOTE_TRIED:
+                return
+            if len(_QUOTE_TRIED) > 64:
+                _QUOTE_TRIED.clear()
+            _QUOTE_TRIED.add(key)
+        threading.Thread(target=_quote_job, args=(cfg, ctx, wx, main),
+                         name="wb-quote", daemon=True).start()
+    except Exception as exc:
+        store.log(f"_maybe_refresh_quote: {exc}")
+
+
+def _quote_job(cfg: dict, ctx: dict, wx: dict | None, main: dict) -> None:
+    if ai.refresh_quote(cfg, ctx, wx, main):
+        with LOCK:
+            STATE["rev"] += 1
+
+
 def build_state() -> dict:
     cfg = store.load_config()
     ann = cfg.get("anniversaries") or []
@@ -148,6 +183,8 @@ def build_state() -> dict:
     # 壁纸是「算」出来的：按今天的天气/时段/季节/天象事件打分，
     # 一天（严格说是一个时段）只算一次，算完存起来，前端只管显示。
     chosen = photos.choose_daily(cfg, ctx, wx)
+    if is_today:
+        _maybe_refresh_quote(cfg, ctx, wx, chosen, daily)
     hero = ([chosen["main"]] if chosen.get("main") else []) + (chosen.get("alts") or [])
 
     with LOCK:
@@ -175,6 +212,8 @@ def build_state() -> dict:
         "daily": {
             "quote": (daily.get("fields") or {}).get("quote", ""),
             "quoteFrom": (daily.get("fields") or {}).get("quoteFrom", ""),
+            # 这句描述的是哪张壁纸 —— 壁纸按时段换了，用它判断要不要重写
+            "quoteFor": (daily.get("fields") or {}).get("quoteFor", ""),
             "recommend": (daily.get("fields") or {}).get("recommend") or {},
             "tags": daily.get("tags") or (daily.get("fields") or {}).get("tags") or [],
             "brief": (daily.get("news") or {}).get("brief") or "",

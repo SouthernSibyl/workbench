@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import subprocess
@@ -26,11 +27,30 @@ def desktop_dir() -> Path:
     return Path(os.path.join(os.environ["USERPROFILE"], "Desktop"))
 
 
+def _digest(p: Path) -> str:
+    h = hashlib.sha1()
+    with open(p, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _same_file(a: Path, b: Path) -> bool:
+    """内容是否一致（大小 + sha1）。"""
+    try:
+        if a.stat().st_size != b.stat().st_size:
+            return False
+        return _digest(a) == _digest(b)
+    except OSError:
+        return False
+
+
 def copy_files() -> None:
     if not SRC.exists():
         raise SystemExit(f"找不到构建产物：{SRC}")
     INSTALL_DIR.mkdir(parents=True, exist_ok=True)
     n = 0
+    skipped: list[str] = []
     for item in SRC.rglob("*"):
         rel = item.relative_to(SRC)
         dst = INSTALL_DIR / rel
@@ -38,9 +58,19 @@ def copy_files() -> None:
             dst.mkdir(parents=True, exist_ok=True)
             continue
         dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(item, dst)
-        n += 1
+        try:
+            shutil.copy2(item, dst)
+            n += 1
+        except PermissionError:
+            # 常见于 VCRUNTIME140.dll：杀软扫描 / 刚退出的进程还捏着句柄。
+            # 内容一样就跳过 —— 这个文件本来就不会变；不一样才算真失败。
+            if _same_file(item, dst):
+                skipped.append(str(rel))
+                continue
+            raise
     print(f"已复制 {n} 个文件 -> {INSTALL_DIR}")
+    if skipped:
+        print(f"  其中 {len(skipped)} 个被占用但内容已一致，跳过：{', '.join(skipped)}")
 
 
 def make_shortcut(target: Path, lnk: Path) -> bool:
