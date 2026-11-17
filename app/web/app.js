@@ -1291,7 +1291,10 @@
     // 他只关心两件：今天有没有东西读、模型配没配。
     const n = (s.daily.items || []).length;
     if (n) meta.push('今天 ' + n + ' 条');
-    meta.push(s.ai.model || '未配置模型 · 简报只列标题');
+    // 配了模型就报模型名；没配但简报里已经有正文（网页版代工写的），
+    // 就别挂「简报只列标题」——那是句假话
+    if (s.ai.model) meta.push(s.ai.model);
+    else if (!String(s.daily.brief || '').trim()) meta.push('未配置模型 · 简报只列标题');
     $('statusMeta').textContent = meta.join('  ·  ');
   }
 
