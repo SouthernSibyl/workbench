@@ -380,7 +380,7 @@ code, body = get("/api/todos", {"action": "set_color", "id": tid, "color": "blue
 _col = [t for t in json.loads(body)["todos"] if t["id"] == tid][0]
 check("待办换颜色", _col.get("color") == "blue", _col.get("color"))
 try:
-    code, body = get("/api/todos", {"action": "set_color", "id": tid, "color": "pink"})
+    code, body = get("/api/todos", {"action": "set_color", "id": tid, "color": "rainbow"})
     check("未知颜色被拒", False, f"竟然接受了（HTTP {code}）")
 except urllib.error.HTTPError as e:
     check("未知颜色被拒", e.code == 400, e.code)
@@ -634,42 +634,86 @@ finally:
         store.write_cache(_key, _backup)
 
 print("=== 14. 配图库并发与索引 ===")
+# 这一段**不碰网络，也不碰真实图库**：
+#   · 图源换成两个本地文件 —— 以前调真的 photos.sync()，网慢时会卡在 SSL read
+#     上十几分钟，一个自测不该因为对方网站慢就挂住；
+#   · 库目录换成临时目录 —— sync 会顺手 prunes 掉「索引里没有的文件」，
+#     跑一次自测就把用户真实图库里的东西删掉，这不能接受。
+import base64
+import tempfile as _tfp
+from pathlib import Path as _P
+
+_real_lib = photos.LIB_DIR
+_real_snap = photos._load_index()
+_lib = _P(_tfp.mkdtemp(prefix="wb-lib-")) / "library"
+_lib.mkdir(parents=True, exist_ok=True)
+photos.LIB_DIR = _lib
+store.write_cache("photos", [])
+photos._INDEX_CACHE = {"mtime": 0.0, "items": []}
+
+_src_dir = _P(_tfp.mkdtemp(prefix="wb-photo-"))
+_FAKE_JPG = base64.b64decode(
+    "/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0a"
+    "HBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPDs0NDT/wAALCAABAAEBAREA/8QAFAABAAAAAAAA"
+    "AAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AKp//2Q==")
+for _i in range(2):
+    (_src_dir / f"t{_i}.jpg").write_bytes(_FAKE_JPG)
+
+photos.scan_local = lambda _c: [
+    {"src": "test", "path": str(_src_dir / f"t{_i}.jpg"), "title": f"自测图 {_i}"}
+    for _i in range(2)]
+for _fn in ("fetch_spotlight", "fetch_bing", "fetch_pexels", "fetch_astro", "fetch_nasa"):
+    if hasattr(photos, _fn):
+        setattr(photos, _fn, lambda *a, **k: [])
+photos._SYNC_LOCK = threading.Lock()
+
 _res = {}
 _barrier = threading.Barrier(3)
 
 
 def _syncer(tag):
     _barrier.wait()
-    _res[tag] = photos.sync(cfg)
+    _res[tag] = photos.sync(cfg, force=True)
 
 
 _ts = [threading.Thread(target=_syncer, args=(i,)) for i in range(3)]
 [t.start() for t in _ts]
 [t.join() for t in _ts]
-check("三路并发的同步只放一路进", sum(1 for v in _res.values()
-                                       if v.get("skipped") == "busy") >= 1, _res)
+check("三路并发的同步只放一路进",
+      sum(1 for v in _res.values() if v.get("skipped") == "busy") >= 1, _res)
+check("同步真的入库了", sum(v.get("added", 0) for v in _res.values()) == 2,
+      {k: v.get("added") for k, v in _res.items()})
 
-_snap = photos._load_index()
-try:
-    _t0 = (_now - datetime.timedelta(seconds=5)).isoformat(timespec="seconds")
-    _other = {"id": "_selftest_other", "file": "_selftest_other.jpg", "src": "test",
-              "addedAt": _now.isoformat(timespec="seconds")}
-    store.write_cache("photos", _snap + [_other])
-    _doomed = _snap[0]
-    photos._save_index(_snap[1:], newer_than=_t0)
-    _after = photos._load_index()
-    _ids = {i.get("id") for i in _after}
-    check("并回别处刚入库的条目", "_selftest_other" in _ids)
-    check("自己淘汰的条目真删了", _doomed.get("id") not in _ids)
-    check("条数 = 保留 + 并回", len(_after) == len(_snap), f"{len(_snap)} -> {len(_after)}")
-finally:
-    store.write_cache("photos", _snap)
-
+# 孤儿 / 死链在「刚同步完」这个一致状态上判 —— 放到后面「人为插入一条不存在的
+# 条目」之后再判，等于自己制造死链去考自己
 _pst = photos.stats()
 check("配图库无孤儿", _pst["orphans"] == 0, f"孤儿 {_pst['orphans']} 个")
 check("配图库无死链",
       all((photos.LIB_DIR / i["file"]).exists() for i in photos._load_index()),
       f"{_pst['total']} 条")
+
+try:
+    _snap = photos._load_index()
+    _t0 = (_now - datetime.timedelta(seconds=5)).isoformat(timespec="seconds")
+    _other = {"id": "_selftest_other", "file": "_selftest_other.jpg", "src": "test",
+              "addedAt": _now.isoformat(timespec="seconds")}
+    # 待淘汰的那条要真的「旧」：刚入库的条目会被 newer_than 并回来，
+    # 那是设计（防止并发同步互相抹掉），不是 bug
+    _doomed = dict(_snap[0], addedAt=(_now - datetime.timedelta(days=90)).isoformat(timespec="seconds"))
+    _rest = [i for i in _snap if i["id"] != _doomed["id"]]
+    store.write_cache("photos", _rest + [_doomed, _other])
+    photos._save_index(_rest, newer_than=_t0)
+    _after = photos._load_index()
+    _ids = {i.get("id") for i in _after}
+    check("并回别处刚入库的条目", "_selftest_other" in _ids)
+    check("自己淘汰的条目真删了", _doomed.get("id") not in _ids)
+    check("条数 = 保留 + 并回", len(_after) == len(_rest) + 1,
+          f"{len(_rest)} + 1 -> {len(_after)}")
+
+finally:
+    # 收尾：库目录与索引都换回真实的那份
+    photos.LIB_DIR = _real_lib
+    store.write_cache("photos", _real_snap)
 
 print("=== 15. 浏览器缓存治理 ===")
 check("有缓存清理清单", len(actions._BROWSER_CACHE_ITEMS) >= 15,
@@ -785,6 +829,9 @@ try:
         "items": [{"title": "过期的探针条目", "url": "http://x", "source": "S",
                    "cat": "要闻", "summary": "", "at": ""}],
     })
+    # 先空跑一次当热身：第一次调用要读池子、编译正则、建缓存，
+    # 在磁盘冷 + 机器忙的时候单独就要 1s 以上 —— 那测的是冷启动，不是「请求路径会不会等网络」
+    ai.build_prompt(cfg, ctx, _wx.peek(cfg), fast=True)
     _t = time.time()
     _fast = ai.build_prompt(cfg, ctx, _wx.peek(cfg), fast=True)
     _ms = (time.time() - _t) * 1000
