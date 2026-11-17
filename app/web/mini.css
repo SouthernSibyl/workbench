@@ -1,0 +1,284 @@
+/* 待办小窗：一个 360×560 左右的小窗口，钉在桌面角落。
+   底色是实的（窗口下面不是壁纸，没必要做玻璃效果），
+   但配色和主窗同一套，看着像同一个应用。 */
+
+:root {
+  --ink: #22252a;
+  --ink-2: #4e535b;
+  --ink-3: #858b94;
+  --accent: #b4763a;
+  --bg: #faf9f7;
+  --line: rgba(20, 22, 26, .09);
+  --hover: rgba(20, 22, 26, .045);
+  --field: rgba(20, 22, 26, .035);
+  --pop-bg: #ffffff;
+  --ring-bg: rgba(180, 118, 58, .10);
+  --ring-line: rgba(180, 118, 58, .38);
+  --sans: "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, sans-serif;
+}
+
+[data-theme="paper"] {
+  --ink: #332c1f;
+  --ink-2: #5f5541;
+  --ink-3: #8d8168;
+  --accent: #a5642a;
+  --bg: #faf4e8;
+  --line: rgba(51, 44, 31, .12);
+  --hover: rgba(51, 44, 31, .05);
+  --field: rgba(51, 44, 31, .045);
+  --pop-bg: #fdf8ee;
+  --ring-bg: rgba(165, 100, 42, .11);
+  --ring-line: rgba(165, 100, 42, .4);
+}
+
+[data-theme="dark"] {
+  --ink: #eceef1;
+  --ink-2: #b3bac3;
+  --ink-3: #7b838e;
+  --accent: #d79a55;
+  --bg: #16181d;
+  --line: rgba(255, 255, 255, .10);
+  --hover: rgba(255, 255, 255, .055);
+  --field: rgba(255, 255, 255, .05);
+  --pop-bg: #1f2229;
+  --ring-bg: rgba(215, 154, 85, .13);
+  --ring-line: rgba(215, 154, 85, .45);
+}
+
+* { box-sizing: border-box; }
+/* 高度**不写死**：html/body/.wrap 都是 auto，窗口多高完全由内容决定。
+   页面量好自己的高度报给后端，后端改窗口大小 —— 所以这里任何一个 100vh/100%
+   都会把「自适应」掐死。 */
+html, body { margin: 0; }
+html { overflow: hidden; }
+
+body {
+  font-family: var(--sans);
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--ink);
+  background: var(--bg);
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+.wrap { display: flex; flex-direction: column; }
+
+/* ------------------------------------------------------------------ 顶栏 */
+
+.bar {
+  flex: 0 0 auto;
+  display: flex; align-items: center; gap: 7px;
+  padding: 8px 9px 7px 12px;
+  border-bottom: 1px solid var(--line);
+  user-select: none;
+}
+.brand { font-size: 11px; font-weight: 600; letter-spacing: 2.2px; color: var(--ink-3); text-transform: uppercase; }
+.count {
+  font-size: 11px; color: var(--ink-3); font-variant-numeric: tabular-nums;
+  padding: 1px 7px; border-radius: 999px; background: var(--hover);
+}
+.sp { flex: 1 1 auto; }
+
+.ibtn {
+  width: 26px; height: 26px; flex: 0 0 26px;
+  display: grid; place-items: center; padding: 0;
+  border: 0; border-radius: 8px; background: transparent;
+  color: var(--ink-3); cursor: pointer;
+  transition: background .14s, color .14s;
+}
+.ibtn:hover { background: var(--hover); color: var(--ink); }
+.ibtn svg { width: 15px; height: 15px; display: block; }
+
+/* 图钉：钉住时是实心的 + 高亮，一眼看出现在是不是置顶 */
+#pinBtn.on { color: var(--accent); background: var(--ring-bg); }
+#pinBtn.on svg path:first-child { fill: currentColor; }
+
+.plus {
+  width: 30px; flex: 0 0 30px;
+  border: 1px solid var(--accent); border-radius: 9px;
+  background: var(--accent); color: #fff; font-size: 15px; line-height: 1;
+  cursor: pointer;
+}
+.plus:hover { filter: brightness(1.07); }
+
+/* -------------------------------------------------------------- 提醒条 */
+
+.ring {
+  flex: 0 0 auto;
+  margin: 8px 8px 0;
+  padding: 9px 10px;
+  border-radius: 11px;
+  background: var(--ring-bg);
+  border: 1px solid var(--ring-line);
+  animation: ringIn .18s ease-out;
+}
+@keyframes ringIn { from { opacity: 0; transform: translateY(-5px); } to { opacity: 1; transform: none; } }
+.ring-h { display: flex; align-items: baseline; gap: 6px; font-size: 10.5px; color: var(--accent); font-weight: 600; letter-spacing: .6px; }
+.ring-t { margin: 3px 0 0; font-size: 13.5px; font-weight: 600; word-break: break-word; }
+.ring-b { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+.ring-b button {
+  font: inherit; font-size: 11.5px; padding: 4px 10px; border-radius: 999px;
+  border: 1px solid var(--ring-line); background: transparent; color: var(--accent);
+  cursor: pointer;
+}
+.ring-b button.solid { background: var(--accent); border-color: var(--accent); color: #fff; }
+.ring-b button:hover { filter: brightness(1.05); }
+
+/* ------------------------------------------------------------------ 列表 */
+
+/* 列表只占内容高度（和主窗同一条规则）：一条待办就只占一行的高度，
+   条目多了才往下长，长到 --list-max 才自己滚。
+   输入框紧跟在列表后面 —— 不给中间塞一个大空洞。
+
+   --list-max 由后端按「工作区高度 × 40%」算好送下来（见 /api/todos 的 maxListPx）。
+   **不能用 vh**：窗口高度本身由内容决定，用 vh 会自己参考自己，绕回去。 */
+.list {
+  flex: 0 1 auto; min-height: 0;
+  overflow-y: auto; overscroll-behavior: contain;
+  max-height: var(--list-max, 40vh);
+  padding: 6px 6px 8px;
+}
+.list::-webkit-scrollbar { width: 8px; }
+.list::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--ink-3) 34%, transparent);
+  border-radius: 8px; border: 2px solid transparent; background-clip: padding-box;
+}
+
+.empty {
+  padding: 16px 14px; text-align: center; color: var(--ink-3);
+  font-size: 12px; line-height: 1.8;
+}
+.empty[hidden] { display: none; }
+
+.row {
+  --todo-c: #A4E2B8;
+  display: flex; align-items: flex-start; gap: 8px;
+  padding: 6px 7px; border-radius: 9px;
+  transition: background .13s;
+  /* 和主窗同一套：整条就用色卡里那个浅彩打底 */
+  background: var(--todo-c);
+  box-shadow: inset 3px 0 0 0 var(--todo-c);
+}
+.row:hover { background: color-mix(in srgb, var(--todo-c) 86%, #fff); }
+.row.done {
+  background: color-mix(in srgb, var(--todo-c) 55%, transparent);
+  box-shadow: inset 3px 0 0 0 color-mix(in srgb, var(--todo-c) 55%, transparent);
+}
+.row.done .t { color: var(--ink-3); text-decoration: line-through; }
+.row.ringing { background: var(--ring-bg); box-shadow: inset 3px 0 0 0 var(--accent); }
+[data-theme="dark"] .row { background: color-mix(in srgb, var(--todo-c) 16%, transparent); }
+[data-theme="dark"] .row:hover { background: color-mix(in srgb, var(--todo-c) 24%, transparent); }
+[data-theme="dark"] .row.done { background: color-mix(in srgb, var(--todo-c) 10%, transparent); }
+[data-theme="dark"] .row.ringing { background: var(--ring-bg); }
+
+.cb {
+  appearance: none; -webkit-appearance: none;
+  width: 15px; height: 15px; flex: 0 0 15px; margin-top: 3px;
+  border-radius: 5px; cursor: pointer;
+  border: 1.5px solid color-mix(in srgb, var(--ink-3) 60%, transparent);
+  background: transparent; position: relative; transition: all .14s;
+}
+.cb:checked { background: var(--accent); border-color: var(--accent); }
+.cb:checked::after {
+  content: ""; position: absolute; left: 4px; top: 1px;
+  width: 4px; height: 8px; border: solid #fff; border-width: 0 1.8px 1.8px 0;
+  transform: rotate(42deg);
+}
+
+.body { flex: 1 1 auto; min-width: 0; }
+.t { word-break: break-word; }
+.t[contenteditable="true"] {
+  outline: none; background: var(--field);
+  border-radius: 5px; box-shadow: 0 0 0 1px var(--accent) inset; padding: 0 3px; margin: 0 -3px;
+}
+
+/* 提醒时间：小胶囊（和主窗一致），到点没做的变红 */
+.when {
+  display: inline-flex; align-items: center; gap: 4px;
+  margin-top: 2px; padding: 1px 7px 1px 5px; border-radius: 999px;
+  font-size: 10.5px; line-height: 1.6;
+  color: var(--ink-2); font-variant-numeric: tabular-nums;
+  background: color-mix(in srgb, var(--ink-3) 12%, transparent);
+}
+.when svg { width: 10px; height: 10px; opacity: .85; }
+.when.soon {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+}
+.when.overdue {
+  color: #c4623f;
+  background: color-mix(in srgb, #c4623f 15%, transparent);
+}
+
+.acts { display: flex; align-items: center; gap: 1px; flex: 0 0 auto; }
+.acts .ibtn { width: 22px; height: 22px; flex: 0 0 22px; opacity: .38; }
+.acts .ibtn svg { width: 13px; height: 13px; }
+.row:hover .acts .ibtn { opacity: 1; }
+.acts .ibtn.armed { opacity: 1; color: var(--accent); }
+.acts .ibtn.cbtn { opacity: 1; background: rgba(255, 255, 255, .55); }
+.acts .ibtn.cbtn .cdot {
+  width: 11px; height: 11px; border-radius: 50%;
+  background: var(--todo-c);
+  box-shadow: inset 0 0 0 1.5px rgba(0, 0, 0, .22);
+}
+.acts .ibtn.cbtn:hover { background: #fff; }
+[data-theme="dark"] .acts .ibtn.cbtn { background: rgba(0, 0, 0, .22); }
+[data-theme="dark"] .acts .ibtn.cbtn:hover { background: rgba(0, 0, 0, .4); }
+.acts .ibtn.pen:hover { color: var(--accent); }
+.acts .ibtn.del:hover { color: #c4623f; }
+
+/* ------------------------------------------------------------------ 输入 */
+
+.add {
+  flex: 0 0 auto;
+  display: flex; align-items: center; gap: 6px;
+  padding: 8px 9px;
+  border-top: 1px solid var(--line);
+  background: var(--bg);
+}
+.add input[type="text"] {
+  flex: 1 1 auto; min-width: 0;
+  font: inherit; font-size: 12.5px;
+  padding: 7px 11px; border-radius: 999px;
+  border: 1px solid var(--line); background: var(--field);
+  color: var(--ink); outline: none;
+}
+.add input[type="text"]:focus { border-color: var(--accent); }
+.add input::placeholder { color: var(--ink-3); }
+#addBell.armed { color: var(--accent); }
+
+.foot {
+  flex: 0 0 auto;
+  display: flex; align-items: center; gap: 8px;
+  padding: 0 11px 8px;
+  font-size: 10.5px; color: var(--ink-3);
+}
+.link {
+  border: 0; background: transparent; padding: 0;
+  font: inherit; font-size: 10.5px; color: var(--ink-3);
+  cursor: pointer; text-decoration: underline; text-underline-offset: 2px;
+}
+.link:hover { color: var(--accent); }
+#permBtn { color: var(--accent); }
+
+/* ------------------------------------------------------------------ 提示 */
+
+.toast-wrap {
+  position: fixed; left: 50%; bottom: 64px; transform: translateX(-50%);
+  display: flex; flex-direction: column; gap: 6px; z-index: 120;
+  pointer-events: none; align-items: center;
+}
+.toast {
+  padding: 6px 12px; border-radius: 999px;
+  background: rgba(28, 30, 36, .90); color: #fff;
+  font-size: 11.5px; line-height: 1.5;
+  max-width: 88vw; animation: toastIn .16s ease-out;
+}
+.toast.warn { background: #8a3d2a; }
+@keyframes toastIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+
+/* 拖拽重排：待办条目可以拖着换位置 */
+.row[draggable] { cursor: grab; }
+.row[draggable]:active { cursor: grabbing; }
+.row.dragging { opacity: .42; }

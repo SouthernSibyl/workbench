@@ -1,0 +1,242 @@
+/* 选时弹层：主窗和待办小窗共用（配 todoui.js）。
+   颜色一律走各页面自己的 CSS 变量，所以两套主题都能直接用。
+
+   ── 「等比例放大」是怎么做到的 ──────────────────────────────
+   不是把每个数值调大，而是让**一个数**决定全部：弹层自己是 container
+   （`container-type: inline-size`），内部字号用 cqw（= 自身宽度的 1%），
+   其余尺寸一律 em。弹层从 338px 宽到 380px 宽时，字、轮子、间距按同一
+   比例一起走，不会出现「字大了间距没跟上」的半缩放。
+   小窗（360px 视口）里弹层 ≈338px、字号 ≈12.5px；主窗里封顶 380px、≈14px。 */
+
+.tui-pop {
+  position: fixed; z-index: 90;
+  container-type: inline-size;
+  width: min(94vw, 380px);
+  max-height: calc(100vh - 16px);
+  display: flex;
+  border-radius: 1.3em;
+  background: var(--pop-bg, #fff);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  box-shadow: 0 24px 56px -24px rgba(0, 0, 0, .58), 0 3px 10px -6px rgba(0, 0, 0, .32);
+  font-family: var(--sans);
+  overflow: hidden;
+  animation: tuiIn .14s cubic-bezier(.2, .9, .3, 1);
+}
+@keyframes tuiIn {
+  from { opacity: 0; transform: translateY(-6px) scale(.98); }
+  to   { opacity: 1; transform: none; }
+}
+
+/* 唯一的「尺寸源」：里面所有元素都跟着它等比缩放 */
+.tui-body {
+  flex: 1 1 auto; min-width: 0;
+  font-size: 3.7cqw;
+  padding: .95em 1em .9em;
+  display: flex; flex-direction: column; gap: .6em;
+  overflow-y: auto;
+}
+
+/* ------------------------------------------------------------------ 标题 */
+
+.tui-pop-h {
+  display: flex; align-items: center; gap: .55em; flex: 0 0 auto;
+  padding-bottom: .75em; border-bottom: 1px solid var(--line);
+}
+.tui-hicon {
+  width: 1.75em; height: 1.75em; flex: 0 0 1.75em; border-radius: .55em;
+  display: grid; place-items: center; color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+.tui-hicon svg { width: 1.05em; height: 1.05em; }
+.tui-htext {
+  flex: 1 1 auto; min-width: 0;
+  font-size: .98em; font-weight: 600; letter-spacing: .01em; color: var(--ink);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.tui-x {
+  width: 1.6em; height: 1.6em; flex: 0 0 1.6em;
+  display: grid; place-items: center; padding: 0;
+  border: 0; border-radius: .5em; background: transparent;
+  color: var(--ink-3); cursor: pointer;
+}
+.tui-x:hover { background: color-mix(in srgb, var(--ink-3) 16%, transparent); color: var(--ink); }
+.tui-x svg { width: .9em; height: .9em; }
+
+/* ------------------------------------------- 快捷档：两列小卡，主文在上时刻在下 */
+
+.tui-quick {
+  display: grid; grid-template-columns: repeat(3, 1fr); gap: .4em; flex: 0 0 auto;
+}
+.tui-chip {
+  display: flex; flex-direction: column; align-items: flex-start; gap: .05em;
+  font: inherit; text-align: left;
+  padding: .45em .55em; border-radius: .75em;
+  border: 1px solid var(--line);
+  background: color-mix(in srgb, var(--ink-3) 5%, transparent);
+  color: var(--ink-2); cursor: pointer;
+  transition: border-color .12s, background .12s, color .12s;
+}
+.tui-chip b { font-weight: 600; font-size: .95em; color: var(--ink); }
+.tui-chip i {
+  font-style: normal; font-size: .8em; color: var(--ink-3);
+  font-variant-numeric: tabular-nums; letter-spacing: .02em;
+}
+.tui-chip:hover {
+  border-color: var(--accent); color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 9%, transparent);
+}
+/* 日期档（今天/明天/后天）用的是同一种卡片，选中态要能看出来 */
+.tui-chip.on {
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+  border-color: var(--accent); color: var(--accent);
+}
+.tui-chip.on b, .tui-chip.on i { color: var(--accent); }
+
+.tui-days { display: grid; grid-template-columns: repeat(3, 1fr); gap: .35em; flex: 0 0 auto; }
+.tui-days .tui-chip { padding: .38em .5em; align-items: center; }
+
+/* 分隔：一行小字 + 两侧细线，把「快捷」和「自己翻」分开 */
+.tui-sep {
+  display: flex; align-items: center; gap: .6em; flex: 0 0 auto;
+  font-size: .78em; letter-spacing: .14em; color: var(--ink-3);
+}
+.tui-sep > span { flex: 0 0 auto; white-space: nowrap; }
+.tui-sep::before, .tui-sep::after {
+  content: ""; flex: 1 1 auto; height: 1px; background: var(--line);
+}
+
+/* ------------------------------------------------ 小时｜分钟 翻动轮 */
+
+.tui-wheels { display: flex; align-items: stretch; gap: .3em; flex: 0 0 auto; }
+.tui-wheel { position: relative; flex: 1 1 0; min-width: 0; }
+
+.tui-wlab {
+  height: 1.4em; line-height: 1.4em; text-align: center;
+  font-size: .78em; letter-spacing: .14em; color: var(--ink-3);
+}
+
+.tui-wscroll {
+  height: 6.6em;
+  overflow-y: scroll; overscroll-behavior: contain;
+  scroll-snap-type: y mandatory;
+  scrollbar-width: none; -ms-overflow-style: none;
+  /* 上下缘淡出：做出「轮子」的感觉，也暗示还能继续翻 */
+  -webkit-mask-image: linear-gradient(180deg, transparent 0, #000 24%, #000 76%, transparent 100%);
+  mask-image: linear-gradient(180deg, transparent 0, #000 24%, #000 76%, transparent 100%);
+}
+.tui-wscroll::-webkit-scrollbar { display: none; }
+
+/* 上下各留半个多行高，第一项 / 最后一项才能被推到中间 */
+.tui-winner { padding: 2.2em 0; }
+.tui-witem {
+  height: 2.2em; line-height: 2.2em; text-align: center;
+  font-size: 1.1em; font-variant-numeric: tabular-nums;
+  color: var(--ink-3);
+  scroll-snap-align: center; cursor: pointer;
+  transition: color .12s;
+}
+.tui-witem.on { color: var(--ink); font-weight: 600; }
+
+/* 中间那条高亮带：位置必须和「居中那一项」严丝合缝 */
+.tui-wheel::after {
+  content: ""; position: absolute; left: 0; right: 0; pointer-events: none;
+  top: calc(1.4em + 2.2em); height: 2.2em;
+  border-radius: .75em;
+  /* 只用淡底 + 两条细线：加一圈 accent 描边之后它长得像一个输入框，
+     用户会以为这里可以直接打字（真正的输入框在下面的「自定义时间」里）。 */
+  background: color-mix(in srgb, var(--accent) 13%, transparent);
+  box-shadow: inset 0 1px 0 var(--surface-line), inset 0 -1px 0 var(--surface-line);
+}
+
+/* 冒号对齐高亮带中心：1.5em 是标签高，剩下 7.6em 的正中间就是带子中心 */
+.tui-colon {
+  width: .8em; flex: 0 0 .8em;
+  display: flex; align-items: center; justify-content: center;
+  padding-top: 1.4em;
+  font-size: 1.1em; font-weight: 600; color: var(--ink-3);
+}
+
+/* ------------------------------------------------------- 预览 / 自定义 */
+
+.tui-preview { flex: 0 0 auto; text-align: center; font-size: .9em; color: var(--ink-3); }
+.tui-preview b { font-weight: 600; color: var(--accent); }
+
+.tui-more {
+  align-self: flex-start; flex: 0 0 auto;
+  border: 0; background: transparent; padding: 0;
+  font: inherit; font-size: .85em; color: var(--ink-3); cursor: pointer;
+  text-decoration: underline; text-underline-offset: .25em;
+}
+.tui-more:hover { color: var(--accent); }
+
+.tui-row { display: flex; gap: .5em; align-items: stretch; flex: 0 0 auto; }
+.tui-row[hidden] { display: none; }
+.tui-row input[type="datetime-local"] {
+  flex: 1 1 auto; min-width: 0;
+  font: inherit; font-size: .95em;
+  padding: .5em .65em; border-radius: .7em;
+  border: 1px solid var(--line);
+  background: var(--field, rgba(0, 0, 0, .03));
+  color: var(--ink); outline: none;
+  font-variant-numeric: tabular-nums;
+}
+.tui-row input[type="datetime-local"]:focus { border-color: var(--accent); }
+
+.tui-go {
+  font: inherit; font-size: .95em; font-weight: 600;
+  padding: 0 1.05em; border-radius: .7em;
+  border: 1px solid var(--accent); background: var(--accent); color: #fff;
+  cursor: pointer; flex: 0 0 auto;
+}
+.tui-go:hover { filter: brightness(1.07); }
+.tui-go:disabled { opacity: .45; cursor: not-allowed; filter: none; }
+
+/* ------------------------------------------------------------------ 底部 */
+
+.tui-foot {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: .6em; flex: 0 0 auto;
+  border-top: 1px solid var(--line); padding-top: .7em;
+  font-size: .85em; color: var(--ink-3);
+}
+.tui-hint { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tui-hint.warn { color: #c4623f; }
+.tui-clr {
+  border: 0; background: transparent; color: var(--ink-3);
+  font: inherit; font-size: .95em; cursor: pointer; padding: 0; flex: 0 0 auto;
+  text-decoration: underline; text-underline-offset: .2em;
+}
+.tui-clr:hover { color: #c4623f; }
+
+/* ------------------------------------------------------------ 莫奈色板 */
+
+/* 色板：一排五个浅彩圆点，和用户在截图里给的那套一致。 */
+.tui-pal { width: min(92vw, 330px); }
+.tui-pal .tui-body { font-size: 13px; gap: .7em; }
+
+.tui-swatches { display: grid; grid-template-columns: repeat(5, 1fr); gap: .35em; }
+.tui-sw {
+  display: flex; flex-direction: column; align-items: center; gap: .4em;
+  padding: .55em .1em; border-radius: .8em;
+  border: 1px solid var(--line); background: transparent;
+  font: inherit; font-size: .9em; color: var(--ink-2); cursor: pointer;
+  transition: border-color .12s, background .12s, color .12s;
+}
+.tui-sw:hover {
+  border-color: var(--sw); color: var(--ink);
+  background: color-mix(in srgb, var(--sw) 22%, transparent);
+}
+.tui-sw.on {
+  border-color: var(--sw); color: var(--ink); font-weight: 600;
+  background: color-mix(in srgb, var(--sw) 32%, transparent);
+}
+.tui-swdot {
+  position: relative; display: grid; place-items: center;
+  width: 1.75em; height: 1.75em; border-radius: 50%;
+  background: var(--sw); box-shadow: inset 0 0 0 1px rgba(0, 0, 0, .10);
+}
+.tui-sw.on .tui-swdot::after {
+  content: "✓"; font-size: .9em; font-weight: 700; color: #2b2f36;
+}
+.tui-swname { white-space: nowrap; font-size: .9em; }

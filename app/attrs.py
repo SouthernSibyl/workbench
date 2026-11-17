@@ -208,6 +208,12 @@ def _flatten() -> dict[str, tuple[str, str]]:
 
 _WORD_TABLE = _flatten()
 
+# 英文词按词边界匹配要编译正则；以前是在 describe 里现拼现 re.escape，
+# 每张图要跑 280 多次（实测一次选图 83,505 次 re.search，光这就吃掉 0.7 秒）。
+# 这里改成模块加载时编译一次，再用「先做子串粗筛」跳过绝大多数词。
+_EN_PATTERNS = {w: re.compile(r"\b" + re.escape(w) + r"\b")
+                for w in _WORD_TABLE if w.isascii()}
+
 
 def describe(text: str) -> dict:
     """把一段描述文字拆成属性。
@@ -224,7 +230,10 @@ def describe(text: str) -> dict:
     flat: list[str] = []
     for word, (layer, cat) in _WORD_TABLE.items():
         if word.isascii():
-            hit = re.search(r"\b" + re.escape(word) + r"\b", low) is not None
+            if word not in low:          # 粗筛：子串都没有，就不用跑正则
+                continue
+            pat = _EN_PATTERNS.get(word)
+            hit = bool(pat and pat.search(low))
         else:
             hit = word in blob
         if not hit:
@@ -302,6 +311,9 @@ def astro_events(d: _dt.date, night: bool = False) -> list[dict]:
                 "title": name,
                 "note": "极大期" if near <= 1 else f"距极大期 {near} 天",
                 "score": 1.0 if near <= 1 else (0.8 if near <= 4 else 0.5),
+                # 只有极大期那两晚才算「特定事件」；前后几天只是背景噪声，
+                # 否则一场流星雨会把一整周的选图都锁进同一个分类
+                "hard": near <= 1,
             })
 
     # 北半球银河季：3 月 ~ 10 月，6~8 月最佳
@@ -309,13 +321,17 @@ def astro_events(d: _dt.date, night: bool = False) -> list[dict]:
         best = 6 <= day.month <= 8
         out.append({"event": "银河", "tags": ["银河"],
                     "title": "银河季", "note": "最佳期" if best else "可见期",
-                    "score": 1.0 if best else 0.6})
+                    "score": 1.0 if best else 0.6,
+                    # 季节级事件：一连几个月都在，不适合当「今夜特别」硬切分类，
+                    # 只做打分加成（选图那边会跳过 seasonal）
+                    "seasonal": True})
 
     # 极光季：秋分到春分（北半球）
     if day.month in (9, 10, 11, 12, 1, 2, 3):
         out.append({"event": "极光", "tags": ["极光"],
                     "title": "极光季", "note": "北半球高纬",
-                    "score": 0.7 if day.month in (10, 11, 2, 3) else 0.5})
+                    "score": 0.7 if day.month in (10, 11, 2, 3) else 0.5,
+                    "seasonal": True})
 
     phase, name = moon_phase(day)
     if name == "满月":

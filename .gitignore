@@ -1,34 +1,30 @@
-# ---- 构建产物 ----
-dist/
-build/pyi/
-build/*.spec.bak
-
-# ---- Python ----
+# Python
 __pycache__/
 *.py[cod]
-*.egg-info/
-.venv/
-venv/
-env/
 
-# ---- 编辑器 / IDE ----
-.vscode/
-.idea/
-*.swp
+# PyInstaller / 打包产物（可重新生成，不纳入版本库）
+dist/
+build/dist/
+build/build/
+build/pyi/
+build/work/
+build/shots/
 
-# ---- 系统 ----
+# 运行期产物
+*.log
+logs/
+cache/
+
+# 系统文件
+.DS_Store
 Thumbs.db
 desktop.ini
 
-# ---- 运行期数据（正常都在 %APPDATA%\Workbench，别放进仓库）----
-config.json
-cache/
-art/
-browser/
-instance.lock
-instance.port
-workbench.log
+# 本地验证用的截图 / CDP 脚本（随时可重生成）
+work/
 
-# ---- 开发过程留档 ----
-docs/shots-local/
-*.bak
+# PyInstaller 工作目录（每次构建都会变，不该进版本库）
+build/Workbench/
+
+# 代工通道 / 本地调试产物（会写出提示词与浏览器痕迹，不纳入版本库）
+outbox/

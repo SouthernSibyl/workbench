@@ -87,7 +87,7 @@ GROUPS: list[dict] = [
         "key": "photos",
         "title": "配图与壁纸",
         "fields": [
-            {"path": "photos.dirs", "label": "我自己的摄影文件夹", "type": "lines",
+            {"path": "photos.dirs", "label": "本机图片文件夹", "type": "lines",
              "hint": "一行一个目录，里面的图会被优先选作壁纸"},
             {"path": "photos.likes", "label": "配图偏好", "type": "keywords",
              "hint": "可选：天象 / 地形 / 植物 / 建筑 / 水景 / 生命 / 人文。命中会加分"},
@@ -97,13 +97,12 @@ GROUPS: list[dict] = [
              "default": True,
              "hint": "读图片自身的拍摄时间(EXIF)、焦段、曝光、来源和文件名来打标签。"
                      "不联网、不花钱，也能覆盖时段/季节/构图这些层"},
-            {"path": "photos.vision_tagging", "label": "视觉模式打标（预留）", "type": "bool",
-             "default": False,
-             "hint": "本轮只做到「开关就位」——打开也不会调用模型，因为它还没接线，"
-                     "开之前不会有任何 token 消耗",
-             "warn": "接线之后：识图更准（能看出画面里是山是海是花），"
-                     "但会把图片传给上面配的视觉模型，token 消耗可能明显变高。默认关闭"},
-            {"path": "photos.pexels_key", "label": "Pexels Key", "type": "password",
+            {"path": "photos.vision_tagging", "label": "视觉识图打标 + 按需介绍", "type": "bool",
+             "default": True,
+             "hint": "把图片发给视觉模型（需要设置里配 ai.vision_model）：看图打标 + 80-140 字介绍，"
+                     "一次调用全做完，介绍存档后与那张图永久绑定显示（替代「每天一句话」）。 "
+                     "只给当前显示的那张图现写，不提前批量预生成；没配视觉模型时退回文字，再没有就本地兜底"},
+             {"path": "photos.pexels_key", "label": "Pexels Key", "type": "password",
              "hint": "可选。填了会按主题真搜图，不填就用内置图源"},
             {"path": "photos.nasa_key", "label": "NASA Key", "type": "password",
              "hint": "可选。留空会退回 DEMO_KEY（每小时只有 30 次配额）"},
@@ -115,14 +114,15 @@ GROUPS: list[dict] = [
         "title": "本地痕迹与隐私",
         "fields": [
             {"path": "signals.enabled", "label": "采集本机使用痕迹", "type": "bool",
-             "default": True,
-             "warn": "开启后，生成简报时会读本机痕迹（AI 助手使用记录、"
-                     "浏览器搜索词与页面标题、桌面最近动过的文件名），"
-                     "压成一段文本**随提示词发给你配置的模型服务**。"
-                     "全部采集都在本机完成、只读；关掉后简报的「与你相关」一类会变弱"},
+             "default": False,
+             "warn": "默认关闭。开启后，生成简报时会读本机痕迹（AI 助手使用记录、"
+                     "浏览器搜索词与页面标题、桌面最近动过的文件名），压成一段文本"
+                     "随提示词一起发给你配置的模型服务。全部采集都在本机完成、只读。"
+                     "不开也能用，只是简报少一类「与你最近在看的有关」"},
             {"path": "signals.browser_history", "label": "包含浏览器历史", "type": "bool",
-             "default": True,
-             "warn": "会只读 Edge / Chrome 的浏览历史库，提取最近搜索词与访问过的页面标题"},
+             "default": False,
+             "warn": "会只读 Edge / Chrome 的浏览历史库，提取最近搜索词与访问过的页面标题。"
+                     "这是最敏感的一项，所以单独一个开关"},
             {"path": "signals.days", "label": "追溯多少天", "type": "int",
              "min": 1, "max": 60, "default": 14},
         ],
@@ -148,6 +148,32 @@ GROUPS: list[dict] = [
         ],
     },
     {
+        "key": "todo",
+        "title": "待办与小窗",
+        "fields": [
+            {"path": "mini.width", "label": "小窗宽度", "type": "int",
+             "min": 260, "max": 800, "default": 360,
+             "hint": "小窗是一个独立窗口，大小和位置都随你拖；下次开窗照原位回来"},
+            {"path": "mini.height", "label": "小窗高度", "type": "int",
+             "min": 340, "max": 1200, "default": 560},
+            {"path": "mini.pinned", "label": "新开的小窗默认钉在最上层", "type": "bool",
+             "default": True,
+             "hint": "就是窗口右上角那个图钉。钉住后别的窗口盖不住它，"
+                     "再点一下解下来；状态会记住"},
+            {"path": "mini.auto_open", "label": "打开工作台时自动摆出小窗", "type": "bool",
+             "default": False},
+            {"path": "reminder.horizon_hours", "label": "提醒最多能约多远（小时）", "type": "int",
+             "min": 1, "max": 87600, "default": 87600,
+             "hint": "上限是 10 年（87600 小时）—— 系统实际能表示、能被扫描线程触发的最大跨度"},
+            {"path": "reminder.system_toast", "label": "到点弹 Windows 通知", "type": "bool",
+             "default": True,
+             "hint": "走系统通知（屏幕右下角）。第一次用的时候浏览器会问一次「允许通知」，"
+                     "点允许就行；不允许的话窗口里也会显示提醒条"},
+            {"path": "reminder.sound", "label": "到点响一声", "type": "bool", "default": True,
+             "hint": "两声短音，页面里现场合成，不带音频文件"},
+        ],
+    },
+    {
         "key": "theme",
         "title": "外观",
         "fields": [
@@ -159,6 +185,11 @@ GROUPS: list[dict] = [
         "key": "adv",
         "title": "高级",
         "fields": [
+            {"path": "log.level", "label": "日志级别", "type": "select", "default": "info",
+             "options": [["debug", "debug（细枝末节都记）"], ["info", "info（默认）"],
+                         ["warn", "warn"], ["error", "error"],
+                         ["fatal", "fatal（只记致命）"]],
+             "hint": "分级照抄 Angular 的 logger；warn 及以上永远落盘，级别调多高都拦不住"},
             {"path": "anniversaries", "label": "自定义纪念日", "type": "ann",
              "hint": "一行一个：2026-11-08 | 某人生日"},
             {"path": "launchers", "label": "启动项（JSON）", "type": "json",
@@ -193,6 +224,24 @@ def set_path(cfg: dict, path: str, value) -> None:
             cur[part] = nxt
         cur = nxt
     cur[parts[-1]] = value
+
+
+# 密钥类字段：设置面板里永远显示成空框，所以「空」要理解成「不改」。
+# 2026-10-19 就吃过这个亏：改完别的项一点保存，整份配置回传，空字符串把真 Key 冲掉了，
+# 第二天 0 点的预生成只能写出骨架，简报里没有一句话、没有总览。
+SECRET_PATHS = ("ai.api_key", "photos.pexels_key", "photos.nasa_key")
+
+
+def keep_blank_secrets(incoming: dict, before: dict) -> list[str]:
+    """把 incoming 里留空的密钥字段换回旧值，返回真正沿用旧值的字段。"""
+    kept: list[str] = []
+    for path in SECRET_PATHS:
+        new = str(get_path(incoming, path) or "").strip()
+        old = str(get_path(before, path) or "").strip()
+        if not new and old:
+            set_path(incoming, path, old)
+            kept.append(path)
+    return kept
 
 
 def blank_config() -> dict:

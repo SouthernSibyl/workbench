@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>待办小窗</title>
+<link rel="icon" href="/static/favicon.svg">
+<link rel="stylesheet" href="/static/mini.css">
+<link rel="stylesheet" href="/static/todoui.css">
+</head>
+<body>
+
+<div class="wrap">
+
+  <header class="bar">
+    <span class="brand">待办</span>
+    <span class="count" id="count">—</span>
+    <span class="sp"></span>
+    <button class="ibtn" id="pinBtn" title="图钉：钉在所有窗口之上">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 17v5"/><path d="M9 3h6l-1 6 4 3.2V15H6v-2.8L10 9z"/></svg>
+    </button>
+    <button class="ibtn" id="mainBtn" title="打开工作台">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4h6v6"/><path d="M20 4l-8 8"/><path d="M18 14v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4"/></svg>
+    </button>
+  </header>
+
+  <div class="ring" id="ring" hidden></div>
+
+  <div class="list" id="list">
+    <div class="empty" id="empty">还没有待办。<br>下面敲一条，回车记下。</div>
+  </div>
+
+  <form class="add" id="addForm" autocomplete="off">
+    <input id="addInput" type="text" maxlength="200"
+           placeholder="写一条，回车记下（可粘贴多行）">
+    <button class="ibtn" type="button" id="addBell" title="加个提醒">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 1 0-12 0c0 6-2.2 7-2.2 7h16.4S18 14 18 8z"/><path d="M10.3 20a2 2 0 0 0 3.4 0"/></svg>
+    </button>
+    <button class="plus" type="submit" title="记下">＋</button>
+  </form>
+
+  <footer class="foot">
+    <span id="footNote">—</span>
+    <span class="sp"></span>
+    <button class="link" id="permBtn" hidden>开通系统通知</button>
+    <button class="link" id="closeBtn">收起</button>
+  </footer>
+
+</div>
+
+<div class="toast-wrap" id="toastWrap"></div>
+
+<script src="/static/todoui.js"></script>
+<script src="/static/mini.js"></script>
+</body>
+</html>

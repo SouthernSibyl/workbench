@@ -133,7 +133,8 @@ def upcoming(d: _dt.date, anniversaries: list[dict] | None = None, days: int = 4
                 "date": nd.isoformat(),
                 "title": t,
                 "inDays": i,
-                "label": nd.strftime("%m月%d日"),
+                # 中文日期不补前导零：「11月07日」读起来像档案编号
+                "label": f"{nd.month}月{nd.day}日",
                 "tone": "today" if i == 0 else ("soon" if i <= 7 else "later"),
             })
     return out

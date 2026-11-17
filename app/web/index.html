@@ -6,11 +6,24 @@
 <title>工作台</title>
 <link rel="icon" href="/static/favicon.svg">
 <link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="/static/todoui.css">
 </head>
-<body>
+<body data-page="home" data-surface="photo">
 
-<!-- 壁纸层 -->
+<!-- 首帧兜底：刷新时如果上次停在「工作台」，别先闪一下壁纸再切过去。
+     这里只读会话里存的值，不做别的判断（页 id 与底面的映射由 pages.js 写）。 -->
+<script>
+  try {
+    var _p = sessionStorage.getItem('wb-page');
+    var _s = sessionStorage.getItem('wb-surface');
+    if (_p) document.body.dataset.page = _p;
+    if (_s) document.body.dataset.surface = _s;
+  } catch (e) { /* 隐私模式，忽略 */ }
+</script>
+
+<!-- 壁纸层：两层叠着做交叉淡入（换图时旧图不会先消失再黑一下） -->
 <div class="wallpaper" id="wallpaper"></div>
+<div class="wallpaper" id="wallpaperB"></div>
 <div class="wallpaper-scrim"></div>
 
 <div class="app">
@@ -52,61 +65,156 @@
     </div>
   </header>
 
-  <main class="grid">
+  <!-- ============================================================ 页面层
+       一页一个 .page，全部常驻 DOM，靠 .is-active 切换（切换逻辑见 pages.js）。
+       页签顺序 = 这里的顺序；加一页只要在下面追一个 section，右侧导航条自动多一条短横线。
+       页面不要塞到 .app 外面 —— 顶栏和导航条是全局的，切页时不重画。 -->
+  <div class="pages" id="pages">
 
-    <!-- 左：快捷启动 -->
-    <section class="col left">
-      <div class="col-head"><h2>快捷启动</h2></div>
-      <div id="launchers" class="launchers"></div>
-    </section>
-
-    <!-- 中：浮在壁纸上的每日一句 -->
-    <section class="col mid">
-      <div class="mid-spacer"></div>
-      <div class="quote-float">
-        <div class="quote" id="quote">正在准备今天的一句话…</div>
-        <div class="quote-from" id="quoteFrom"></div>
+    <!-- 首页：只留风景。data-wheel="next" = 往下滚一下进工作台 -->
+    <section class="page is-active" data-page="home" data-label="风景" data-surface="photo"
+             data-hint="壁纸与科普 · 往下滚或按 → 进入工作台" data-wheel="next">
+      <!-- 文案由 app.js 的 renderHomeCopy() 填：图名 / 引子（画面段）/ 科普段 / 署名 -->
+      <div class="home-copy" id="homeCopy">
+        <div class="home-kicker" id="homeKicker"></div>
+        <p class="home-lead" id="homeLead">正在读取这张图的介绍…</p>
+        <p class="home-note" id="homeNote"></p>
+        <div class="home-meta" id="homeMeta"></div>
       </div>
     </section>
 
-    <!-- 右：今日简报 + 待办 + 节日（嵌入） -->
-    <aside class="col right">
-      <div class="card glass news-card">
-        <div class="card-head">
-          <span>今日简报</span>
-          <span class="pill" id="newsMeta">—</span>
+    <!-- 工作台：原来的三列面板整体搬到这一页 -->
+    <section class="page" data-page="desk" data-label="工作台" data-surface="flat"
+             data-hint="快捷启动 · 待办">
+    <main class="grid">
+
+      <!-- 左：快捷启动 -->
+      <section class="col left">
+        <div class="col-head"><h2>快捷启动</h2></div>
+        <div id="launchers" class="launchers"></div>
+      </section>
+
+      <!-- 右：今日壁纸入口 + 待办 -->
+      <!-- 简报和 GitHub 已经搬去「资讯」页：这一页只留每天要点的东西 -->
+      <aside class="col right">
+        <button class="wall-peek" data-act="wallPeek" type="button" title="看大图与这张图的介绍">
+          <span class="wp-dot"></span>
+          <span class="wp-text" id="peekText">今日壁纸</span>
+          <span class="wp-more">查看 ›</span>
+        </button>
+
+        <!-- 今日速览：工作台这一页原来只有启动项和待办，右侧空掉半屏。
+             简报正文在「资讯」页，这里只放开头两行，点进去看全文。 -->
+        <section class="card glass desk-brief" id="deskBrief" hidden>
+          <div class="card-head">
+            <span>今天</span>
+            <span class="pill">简报摘要</span>
+          </div>
+          <p class="db-text" id="dbText"></p>
+          <button class="db-more" data-act="goFeed" type="button">读完整简报 →</button>
+        </section>
+
+        <div class="card glass todo-card">
+          <div class="card-head">
+            <span>待办</span>
+            <span class="todo-tools">
+              <button class="iconbtn sm" data-act="todoMini" title="打开待办小窗（可图钉置顶）">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="13" height="14" rx="2.5"/><path d="M19 8v9a2 2 0 0 1-2 2H8"/></svg>
+              </button>
+              <button class="iconbtn sm" data-act="todoClearDone" title="清掉已完成">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16"/><path d="M9 7V4.6h6V7"/><path d="M6.5 7l.8 12a2 2 0 0 0 2 1.9h5.4a2 2 0 0 0 2-1.9L17.5 7"/></svg>
+              </button>
+              <span class="pill" id="todoMeta">—</span>
+            </span>
+          </div>
+          <div class="todo-input">
+            <input id="todoInput" type="text" placeholder="写一条，回车添加（可粘贴多行）" maxlength="200">
+            <button class="mini" data-act="todoAdd">加</button>
+          </div>
+          <div class="todos" id="todos"></div>
+          <div class="todo-foot" id="todoFoot"></div>
         </div>
-        <div class="items" id="newsItems" tabindex="0"></div>
-        <div class="items-foot">
-          <span class="items-hint">滚轮翻</span>
-          <span class="items-pos" id="itemsPos">—</span>
+
+        <div class="col-spacer"></div>
+        <div class="festival-embed" id="festivalOne" hidden></div>
+      </aside>
+
+    </main>
+
+      <!-- 状态栏跟着面板走：首页要看风景，就别在底下挂一排心跳日志 -->
+      <footer class="statusbar">
+        <span id="statusNote">就绪</span>
+        <span class="dot" id="statusDot"></span>
+        <span class="spacer"></span>
+        <span id="statusMeta"></span>
+      </footer>
+    </section>
+
+    <!-- ===================== 资讯 =====================
+         新闻和 GitHub 共用一页，顶部分段切换。
+         拆出来的理由：620px 高的窗口塞两列 6 个模块，新闻只够放 1 条；
+         而且滚轮语义会打架（首页翻页 / 简报翻行 / 待办滚动）。 -->
+    <section class="page" data-page="feed" data-label="资讯" data-surface="flat"
+             data-hint="今日简报 · 涨星速递">
+      <div class="page-pad feed">
+
+        <div class="feed-head">
+          <div class="feed-tabs" id="feedTabs">
+            <button class="feed-tab on" data-tab="news" type="button">
+              今日简报<span class="pill" id="newsMeta">—</span>
+            </button>
+            <button class="feed-tab" data-tab="gh" type="button">
+              涨星速递<span class="pill" id="ghCount">—</span>
+            </button>
+            <!-- 收藏：跨天留着的东西都在这。第三段而不是第五页 ——
+                 收藏的来源就是「在读资讯」，换页找它反而绕。 -->
+            <button class="feed-tab" data-tab="bm" type="button">
+              收藏<span class="pill" id="bmCount">—</span>
+            </button>
+          </div>
+          <span class="feed-hint" id="feedHint">滚轮翻行</span>
+        </div>
+
+        <div class="feed-body" id="feedBody" data-tab="news">
+
+          <div class="card glass news-card">
+            <div class="items" id="newsItems" tabindex="0"></div>
+            <div class="items-foot">
+              <span class="items-hint" id="itemsHint">点开看要点</span>
+              <span class="items-pos" id="itemsPos">—</span>
+            </div>
+          </div>
+
+          <div class="gh-list" id="ghList"></div>
+
+          <!-- 收藏：资讯与仓库混在一起，按收藏时间倒序 -->
+          <div class="bm-list" id="bmList"></div>
+
         </div>
       </div>
+    </section>
 
-      <div class="card glass todo-card">
-        <div class="card-head">
-          <span>待办</span>
-          <span class="pill" id="todoMeta">—</span>
+    <!-- ================================================== 新增一页从这里抄
+         取消注释就是第三页，右侧导航条会自动多一条短横线：
+           · data-label  悬停时显示的页名
+           · data-hint   原生 tooltip（鼠标停留时的说明）
+           · data-wheel="next"  可选，这一页往下滚会翻到下一页
+         页面里直接用现成的类就行：.card.glass / .card-head / .pill / .btn / .page-pad。
+         要取实时数据、要开关定时器，去 pages.js 末尾用 WB.page({...}) —— 别在这里写脚本。 -->
+    <!--
+    <section class="page" data-page="mypage" data-label="我的页" data-hint="一句话说明这页干什么">
+      <div class="page-pad">
+        <div class="card glass">
+          <div class="card-head"><span>标题</span><span class="pill">说明</span></div>
+          <div class="empty">这里写内容。</div>
         </div>
-        <div class="todo-input">
-          <input id="todoInput" type="text" placeholder="写一条，回车添加" maxlength="120">
-          <button class="mini" data-act="todoAdd">加</button>
-        </div>
-        <div class="todos" id="todos"></div>
       </div>
+    </section>
+    -->
+  </div>
 
-      <div class="col-spacer"></div>
-      <div class="festival-embed" id="festivalOne" hidden></div>
-    </aside>
-
-  </main>
-
-  <footer class="statusbar">
-    <span id="statusNote">就绪</span>
-    <span class="dot" id="statusDot"></span>
-    <span class="spacer"></span>
-    <span id="statusMeta"></span>
-  </footer>
+  <!-- 右侧页签：短横线由 pages.js 按页生成，不写死 -->
+  <nav class="rail" id="rail" aria-label="页面切换" hidden></nav>
 </div>
 
 <!-- 壁纸署名 -->
@@ -122,10 +230,14 @@
       <span class="drawer-cat" id="dCat"></span>
       <span class="drawer-idx" id="dIdx"></span>
       <span class="spacer"></span>
+      <!-- 收藏入口：读到这里才会想留，所以放抽屉里，不用回列表再点一次 -->
+      <button class="btn ghost" data-act="dBookmark" id="dBookmark" type="button">⚐ 收藏</button>
       <button class="btn ghost" data-act="closeDrawer">关闭 ✕</button>
     </div>
     <h2 class="drawer-title" id="dTitle"></h2>
     <div class="drawer-meta"><span id="dMeta"></span></div>
+    <!-- 排序理由：这条为什么排在这里。没有它，算法跑偏了也看不出来。 -->
+    <div class="drawer-rank" id="dRankWhy" hidden></div>
   </header>
 
   <div class="drawer-body">
@@ -146,6 +258,14 @@
     </div>
   </div>
 
+  <!-- 评分：放在抽屉里而不是藏进悬停 —— 读完一条正好可以表态，
+       而且 10 个刻度摊开比列表里那个小星星可靠得多。 -->
+  <div class="drawer-rate" id="dRate">
+    <span class="dr-k">这条值得看吗</span>
+    <div class="dr-scale" id="drScale" role="group" aria-label="给这条资讯打分"></div>
+    <span class="dr-note" id="drNote"></span>
+  </div>
+
   <footer class="drawer-foot">
     <button class="btn" data-act="dPrev">← 上一条</button>
     <button class="btn" data-act="dNext">下一条 →</button>
@@ -153,6 +273,28 @@
     <span class="drawer-prog" id="dProg"></span>
   </footer>
 </aside>
+
+<!-- ===================== 今日壁纸：大图 + 文案 ===================== -->
+<div class="modal" id="wallModal" hidden>
+  <div class="modal-box wall-box">
+    <div class="modal-head">
+      <h3 id="wallModalTitle">今日壁纸</h3>
+      <button class="btn ghost" data-act="closeWall">关闭</button>
+    </div>
+    <div class="modal-body wall-body-wrap">
+      <img class="wall-preview" id="wallPreview" alt="">
+      <div class="wall-cap" id="wallCap"></div>
+      <div class="wall-body" id="wallBody"></div>
+      <div class="wall-meta" id="wallMeta"></div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn" data-act="wallPrev">← 上一张</button>
+      <button class="btn" data-act="wallNext">下一张 →</button>
+      <span class="spacer"></span>
+      <span class="modal-msg" id="wallMsg"></span>
+    </div>
+  </div>
+</div>
 
 <!-- ===================== 设置 ===================== -->
 <div class="modal" id="modal" hidden>
@@ -165,6 +307,7 @@
       <!-- 内容由 app.js 按 /api/settings-schema 渲染 —— 加配置项只改
            app/settings_schema.py，不用动这个文件 -->
       <div id="cfgBody"></div>
+      <div class="modal-note" id="aboutLine"></div>
       <div class="modal-note" id="cfgPath"></div>
     </div>
     <div class="modal-foot">
@@ -193,6 +336,8 @@
   </div>
 </div>
 
+<script src="/static/todoui.js"></script>
+<script src="/static/pages.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>

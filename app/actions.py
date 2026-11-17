@@ -6,7 +6,6 @@ import os
 import shutil
 import subprocess
 import time
-import urllib.request
 import webbrowser
 from pathlib import Path
 
@@ -15,10 +14,6 @@ import store
 CREATE_NO_WINDOW = 0x08000000
 DETACHED = 0x00000008
 
-_NODE_CANDIDATES = [
-    r"C:\Program Files\nodejs\node.exe",
-    r"C:\Program Files (x86)\nodejs\node.exe",
-]
 
 _EDGE_CANDIDATES = [
     r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
@@ -60,78 +55,10 @@ def run_shell(command: str, cwd: str = "") -> dict:
     return {"ok": True, "message": "已发出启动指令"}
 
 
-# -------------------------------------------------------------------- 读书站
-
-def _probe_reader(port: int, timeout: float = 0.7) -> str | None:
-    url = f"http://127.0.0.1:{port}/api/books"
-    try:
-        with urllib.request.urlopen(url, timeout=timeout) as resp:
-            if resp.status == 200 and b"books" in resp.read(4096):
-                return f"http://127.0.0.1:{port}"
-    except Exception:
-        return None
-    return None
-
-
-def find_node(node_dir: str = "") -> str | None:
-    if node_dir:
-        cand = Path(node_dir) / "node.exe"
-        if cand.exists():
-            return str(cand)
-    for c in _NODE_CANDIDATES:
-        if Path(c).exists():
-            return c
-    return shutil.which("node")
-
-
-def open_url(url: str) -> None:
-    try:
-        webbrowser.open(url)
-    except Exception as exc:
-        store.log(f"open_url failed: {exc}")
-
-
-def launch_ebook(cfg: dict, entry: dict) -> dict:
-    port = int(entry.get("port") or 8787)
-    for p in range(port, port + 21):
-        hit = _probe_reader(p)
-        if hit:
-            open_url(hit)
-            return {"ok": True, "message": f"读书站已在运行（{p}），已为你打开"}
-    server = str(entry.get("server") or "").strip()
-    books = str(entry.get("books") or "").strip()
-    if not server or not Path(server).exists():
-        return {"ok": False, "message": "找不到 reader-server.mjs，请检查配置"}
-    node = find_node(str(entry.get("node_dir") or ""))
-    if not node:
-        return {"ok": False, "message": "找不到 node，请检查配置里的 node 目录"}
-    args = [node, server]
-    if books:
-        args += ["--books", books]
-    args += ["--port", str(port)]
-    try:
-        subprocess.Popen(args, cwd=str(Path(server).parent),
-                         creationflags=CREATE_NO_WINDOW | DETACHED,
-                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                         stderr=subprocess.DEVNULL, close_fds=True)
-    except OSError as exc:
-        return {"ok": False, "message": f"启动读书站失败：{exc}"}
-    for _ in range(40):
-        time.sleep(0.5)
-        for p in range(port, port + 21):
-            hit = _probe_reader(p, timeout=0.4)
-            if hit:
-                open_url(hit)
-                return {"ok": True, "message": f"读书站已启动（{p}）"}
-    return {"ok": False, "message": "读书站启动超时，请看 workbench.log"}
-
-
 # ------------------------------------------------------------------ 统一入口
 
 def launch(cfg: dict, entry: dict) -> dict:
     kind = str(entry.get("kind") or "file")
-    if kind == "ebook":
-        return launch_ebook(cfg, entry)
     if kind == "url":
         url = str(entry.get("url") or "").strip()
         if not url:
@@ -256,6 +183,14 @@ LAUNCH_EXTS = {".exe", ".lnk", ".bat", ".cmd", ".url", ".msc",
                ".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp",
                ".mp3", ".flac", ".wav", ".mp4", ".mkv", ".avi", ".mov",
                ".zip", ".rar", ".7z", ".py", ".mjs", ".js", ".json", ".ini"}
+
+
+def browser_exe() -> str | None:
+    """能开「应用模式窗口」的 Chromium 内核浏览器（Edge 优先）。"""
+    for exe in _EDGE_CANDIDATES:
+        if Path(exe).exists():
+            return exe
+    return None
 
 
 def open_window(url: str, width: int = 1380, height: int = 880) -> dict:
@@ -390,6 +325,22 @@ def find_app_window(title: str = APP_WINDOW_TITLE) -> int | None:
         return None
 
 
+def focus_app_window(title: str = APP_WINDOW_TITLE) -> bool:
+    """把已经开着的主窗提到前台（最小化的先还原）。纯 ctypes，不碰 COM。"""
+    hwnd = find_app_window(title)
+    if not hwnd:
+        return False
+    try:
+        import ctypes
+        u32 = ctypes.windll.user32
+        if u32.IsIconic(int(hwnd)):
+            u32.ShowWindow(int(hwnd), 9)        # SW_RESTORE
+        u32.SetForegroundWindow(int(hwnd))
+        return True
+    except Exception:
+        return False
+
+
 def window_open(hwnd: int | None) -> bool | None:
     """那个窗口句柄还有效吗（窗口是否还开着）。None = 没句柄可查。"""
     if not hwnd:
@@ -399,6 +350,15 @@ def window_open(hwnd: int | None) -> bool | None:
         return bool(ctypes.windll.user32.IsWindow(int(hwnd)))
     except Exception:
         return None
+
+
+def deferred_sweep_mini(delay: int = 32) -> None:
+    """小窗那份浏览器配置也清一遍（它和图库无关，纯粹是 Chromium 的缓存）。"""
+    try:
+        time.sleep(max(0, delay))
+        _sweep_browser_caches(store.DATA_DIR / "browser-mini")
+    except Exception as exc:
+        store.log(f"mini sweep failed: {exc}")
 
 
 def deferred_sweep(delay: int = 25) -> None:

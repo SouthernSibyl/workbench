@@ -23,25 +23,24 @@ CONFIG_PATH = DATA_DIR / "config.json"
 CACHE_DIR = DATA_DIR / "cache"
 ART_DIR = DATA_DIR / "art"
 LOG_PATH = DATA_DIR / "workbench.log"
+LOGS_DIR = DATA_DIR / "logs"
+
+import logbook  # noqa: E402  —— 日志模块只依赖标准库，放这儿避开循环引用
+
+logbook.init(DATA_DIR)
 
 _lock = threading.RLock()
 
 # ---------------------------------------------------------------- 默认启动器
-
-# 默认是空的：启动项和这台机器强相关（装在哪、怎么启动只有用户自己知道），
-# 所以首次运行不预设任何条目，由用户在界面上点「添加启动项」自己挑。
-#
-# 想改成「开箱带几个示例」，往下面这个列表里加 dict 即可，字段见 README：
-#   kind="file"  -> {"id","title","subtitle","icon","accent","kind","path"}
-#   kind="shell" -> {"id","title","subtitle","icon","accent","kind","command","cwd"}
-#   kind="url"   -> {"id","title","subtitle","icon","accent","kind","url"}
-#   kind="ebook" -> {"id","title","subtitle","icon","accent","kind",
-#                    "node_dir","server","books","port"}
+# 空列表是故意的。启动项全是「这台机器上装了什么」，任何写死的默认值
+# 换台电脑都是错的 —— 用户第一次打开时看到几个点不动的图标，比看到一张
+# 「添加第一个」的空卡更糟。首启由界面引导，见 renderLaunchers()。
 DEFAULT_LAUNCHERS: list[dict] = []
 
-# 资讯源：只留「要闻 / 财经 / 科技 / 学术」，娱乐一律不进。
+# 资讯源：默认只留「要闻 / 财经 / 科技 / 学术」，娱乐体育不进。
 # 2026-10 实测：人民网 / 新华网的 RSS 已停更（仍在推 2025-06-05 的存档），
-# 所以政经主力换成中新网各频道 + 界面新闻，全部是当天内容。
+# 所以政经主力用中新网各频道 + 界面新闻，全部是当天内容。
+# 这些只是出厂值，设置页里能增删改。
 DEFAULT_FEEDS = [
     {"name": "中新网·国内", "url": "https://www.chinanews.com.cn/rss/china.xml", "cat": "要闻"},
     {"name": "中新网·滚动", "url": "https://www.chinanews.com.cn/rss/scroll-news.xml", "cat": "要闻"},
@@ -61,7 +60,7 @@ DEFAULT_FEEDS = [
 # 已停更的源，配置里出现它们就说明是老配置，自动换掉
 DEAD_FEED_MARKERS = ("people.com.cn", "xinhuanet.com", "caixin.com", "thepaper.cn", "36kr.com")
 
-# 娱乐 / 体育 / 生活八卦关键词，命中即丢弃（用户明确要求不要推送这类）
+# 娱乐 / 体育 / 生活八卦关键词，命中即丢弃。出厂默认，可在设置里改。
 NEWS_EXCLUDE = [
     # 娱乐
     "明星", "综艺", "八卦", "绯闻", "恋情", "分手", "选秀", "追星", "饭圈",
@@ -76,10 +75,11 @@ NEWS_EXCLUDE = [
     "带货", "种草", "探店", "网红打卡",
 ]
 
-# 正经政经 / 学术关键词，用来在排序时加权（用户要的是新闻联播那种分量）
+# 正经政经 / 学术关键词，用来在排序时加权。
+# 只放机构与议题，不放具体人名 —— 名单一长就变成立场，工具不该替人挑立场。
 NEWS_BOOST = [
     "国务院", "中共中央", "政治局", "全国人大", "全国政协", "中央经济工作会议",
-    "习近平", "李强", "外交部", "国防部", "发改委", "财政部", "人民银行", "央行",
+    "外交部", "国防部", "发改委", "财政部", "人民银行", "央行",
     "政策", "改革", "规划", "条例", "意见", "通知", "发布", "签署", "会谈",
     "经济", "金融", "贸易", "出口", "进口", "关税", "投资", "产业", "制造业",
     "科技", "创新", "芯片", "人工智能", "能源", "航天", "量子", "生物",
@@ -110,7 +110,16 @@ DEFAULT_CONFIG = {
         "chars_per_minute": 400,
         "max_age_days": 3,
     },
+    # 待办本身不限量（列表多长都行，界面滚动）；每条都能带一个提醒时间。
     "todos": [],
+    # 待办小窗：独立窗口，可图钉置顶。x/y 记上次摆在哪，下次照原位开。
+    # auto=True：窗口高度跟着待办内容走；用户手动拖过大小就置 False，从此听用户的。
+    # content_h：页面量出来的「去掉弹层后的内容高度」。开窗时用它，
+    # 免得先按旧高度开一下、再被页面改一次（看着像闪了一下）。
+    "mini": {"width": 360, "height": 560, "x": None, "y": None,
+             "pinned": True, "auto_open": False, "auto": True, "content_h": None},
+    # 到点提醒：走 Windows 右下角的系统通知；声音是页内合成的短音，不占文件
+    "reminder": {"system_toast": True, "sound": True, "horizon_hours": 87600},
     "photos": {
         "pexels_key": "",
         "nasa_key": "",
@@ -121,12 +130,15 @@ DEFAULT_CONFIG = {
         "rotate": True,
         # 本地推导属性（来源 / EXIF / 文件名）：零成本，默认开
         "tag_local": True,
-        # 视觉模式打标：更准，但会把图传给模型、烧 token，默认关
-        "vision_tagging": False,
+        # 视觉识图打标 + 每图介绍：把图发给视觉模型，标签+介绍一次生成；
+        # 没配视觉模型时自动退回文字写介 / 本地兜底
+        "vision_tagging": True,
         "retagged": True,
     },
-    # 本机痕迹采集（决定简报里「与你相关」那一类）。关掉后不采集、提示词里也不出现。
-    "signals": {"enabled": True, "browser_history": True, "days": 14},
+    # 本机痕迹采集（读浏览器历史，判断简报里哪些与你最近在看的有关）。
+    # 默认全关：这是别人机器，读浏览历史这种事必须由他本人点开，
+    # 不能因为「装上了」就默认发生。设置页里可以单独开。
+    "signals": {"enabled": False, "browser_history": False, "days": 14},
     "anniversaries": [],
     "launchers": DEFAULT_LAUNCHERS,
     "window": {"width": 1420, "height": 900},
@@ -135,6 +147,8 @@ DEFAULT_CONFIG = {
     # 阈值太紧会把还在用的服务误杀（历史上被这个坑过）。
     "power": {"prefetch_tomorrow": True, "keepalive_seconds": 600,
               "sweep_browser_cache": True},
+    # 日志级别：debug / info / warn / error / fatal
+    "log": {"level": "info"},
     "theme": "light",
 }
 
@@ -147,7 +161,7 @@ def ensure_dirs() -> None:
             pass
 
 
-CONFIG_VERSION = 7
+CONFIG_VERSION = 11
 
 
 # ------------------------------------------------------------ 启动项（可自选文件）
@@ -247,6 +261,92 @@ def normalize_launchers(items) -> list[dict]:
     return out
 
 
+# ------------------------------------------------------------ 待办（不限量）
+
+TODO_MAX_TEXT = 200
+
+# 莫奈浅彩：首页和待办小窗共用的色板（名字与色值在前端 todoui.js 里）。
+# 存的是色名而不是 hex —— 以后调色板只动前端，老配置也不会存一堆过时色值。
+TODO_COLORS = ("green", "blue", "yellow", "orange", "pink")
+TODO_DEFAULT_COLOR = "green"
+
+
+def todo_id(text: str, salt: str = "") -> str:
+    """给待办生成一个稳定好认的 id。
+
+    老配置里手写的条目可能没有 id，就用「内容 + 序号」算一个 ——
+    同一份内容在同一个进程里算出来是同一个 id，界面不会每次轮询都换 key。
+    """
+    import hashlib as _h
+    base = f"{text}|{salt}".encode("utf-8", "ignore")
+    return "t" + _h.sha1(base).hexdigest()[:12]
+
+
+def normalize_todos(items) -> list[dict]:
+    """把待办洗成统一形状：id / text / done / at / remindAt / reminded / remindedAt。
+
+    不做数量上限 —— 用户要的是「不限量」，列表长到几百条也得照存，
+    显示端自己滚动。这里只负责让每条都长得一样，省得别处到处 .get 兜底。
+    """
+    out: list[dict] = []
+    seen: set[str] = set()
+    for idx, raw in enumerate(items or []):
+        if not isinstance(raw, dict):
+            continue
+        text = str(raw.get("text") or "").strip()[:TODO_MAX_TEXT]
+        if not text:
+            continue
+        tid = str(raw.get("id") or "").strip() or todo_id(text, str(idx))
+        while tid in seen:
+            tid += "x"
+        seen.add(tid)
+        remind = str(raw.get("remindAt") or "").strip()
+        color = str(raw.get("color") or "").strip().lower()
+        if color not in TODO_COLORS:
+            color = TODO_DEFAULT_COLOR
+        out.append({
+            "id": tid,
+            "text": text,
+            "color": color,
+            "done": bool(raw.get("done")),
+            "at": str(raw.get("at") or "").strip(),
+            # remindAt 为空 = 没设定时；reminded 只在有 remindAt 时才有意义
+            "remindAt": remind,
+            "reminded": bool(raw.get("reminded")) and bool(remind),
+            "remindedAt": str(raw.get("remindedAt") or "").strip() if remind else "",
+        })
+    return out
+
+
+def mutate_todos(fn) -> list[dict]:
+    """在一把锁里「读 → 改 → 写」，返回新的待办列表。
+
+    为什么不让调用方自己 load_config + patch_config：提醒巡检线程和界面
+    几乎同时会改同一份列表（到点标记 reminded / 用户勾选 done），
+    两步写会互相覆盖 —— 表现是「刚提醒过的又提醒一遍」。
+    """
+    with _lock:
+        cfg = load_config()
+        items = normalize_todos(cfg.get("todos"))
+        new = fn(items)
+        if isinstance(new, list):
+            items = new
+        cfg["todos"] = items
+        save_config(cfg)
+        return items
+
+
+def mutate_mini(**kw) -> dict:
+    """改小窗那几项（位置/图钉），只合并给进来的键。"""
+    with _lock:
+        cfg = load_config()
+        mini = dict(cfg.get("mini") or {})
+        mini.update({k: v for k, v in kw.items() if v is not None})
+        cfg["mini"] = mini
+        save_config(cfg)
+        return mini
+
+
 def _atomic_write(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
@@ -281,11 +381,21 @@ def _migrate(cfg: dict) -> tuple[dict, bool]:
 
     changed = False
 
-    # --- 启动器：补齐字段、清洗老配置里的多余键 ---
+    # --- 启动器：只做字段规整，不补默认项 ---
+    # 这里的默认表是空的（启动项和具体机器强相关），所以老配置里的条目
+    # 原样留着，只把早期版本缺的 id / kind 补齐。
     old = list(cfg.get("launchers") or [])
-    cleaned = normalize_launchers(old)
-    if cleaned != old:
-        cfg["launchers"] = cleaned
+    merged: list[dict] = []
+    for item in old:
+        if not isinstance(item, dict):
+            continue
+        base = dict(item)
+        base.setdefault("id", str(item.get("title") or item.get("path") or ""))
+        base.setdefault("kind", "file" if item.get("path") else "shell")
+        base.pop("badge", None)
+        merged.append(base)
+    if merged != old:
+        cfg["launchers"] = merged
         changed = True
 
     # --- 资讯源：老配置没有分类字段，或含已停更的源，整体换成新的实时源 ---
@@ -327,6 +437,35 @@ def _migrate(cfg: dict) -> tuple[dict, bool]:
             cfg.setdefault(key, {})
         changed = True
 
+    if ver < 8:
+        # 「视觉识图 + 每图一介」上线。vision_tagging 原先只是预留开关、一直是 False，
+        # 现在正式接线（识图 + 介绍一次调用，替代「每天一句话」）——
+        # 老配置统一打开，不想烧 token 可以随时在设置里关。
+        ph8 = cfg.get("photos") or {}
+        ph8["vision_tagging"] = True
+        cfg["photos"] = ph8
+        changed = True
+
+    if ver < 9:
+        # 「不限量待办 + 定时提醒 + 独立小窗」上线。
+        # 老条目只有 id/text/done/at，这里补齐 remindAt/reminded/remindedAt；
+        # mini / reminder 两节的默认值由 _deep_merge 补，这里只落一次盘。
+        cfg["todos"] = normalize_todos(cfg.get("todos"))
+        for key in ("mini", "reminder"):
+            cfg.setdefault(key, dict(DEFAULT_CONFIG[key]))
+        (cfg.get("mini") or {}).setdefault("auto", True)
+        changed = True
+
+    if ver < 10:
+        # 待办可挑颜色：老条目没有 color，归一化时统一落到莫奈绿。
+        cfg["todos"] = normalize_todos(cfg.get("todos"))
+        changed = True
+
+    if ver < 11:
+        # 色板换成一整套浅彩：旧色名重新归一化，不认识的落回莫奈绿。
+        cfg["todos"] = normalize_todos(cfg.get("todos"))
+        changed = True
+
     cfg["configVersion"] = CONFIG_VERSION
     return cfg, True
 
@@ -344,6 +483,10 @@ def load_config() -> dict:
             raw = {}
         merged = _deep_merge(DEFAULT_CONFIG, raw)
         merged, changed = _migrate(merged)
+        try:
+            logbook.set_level((merged.get("log") or {}).get("level") or "info")
+        except Exception:
+            pass
         if changed:
             try:
                 _atomic_write(CONFIG_PATH,
@@ -397,4 +540,11 @@ def log(msg: str) -> None:
         with open(LOG_PATH, "a", encoding="utf-8") as fh:
             fh.write(line)
     except OSError:
+        pass
+    # 旧调用点没写「意图」，镜像进 JSONL 时如实说明，不假装知道原因
+    try:
+        logbook.get("legacy").info(
+            str(msg).strip(),
+            intent="旧调用点（store.log）未标注意图，按原样镜像")
+    except Exception:
         pass

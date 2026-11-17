@@ -117,15 +117,21 @@ def main() -> int:
     ok = make_shortcut(EXE, lnk)
     if ok:
         print(f"桌面快捷方式已创建：{lnk}")
-        if legacy.exists():
-            try:
-                legacy.unlink()
-                print("已清掉旧的硬链接占位：", legacy)
-            except OSError:
-                pass
+    elif lnk.exists():
+        # 已经有 .lnk 了（比如上一次是带 pywin32 的环境建的），就留着它 ——
+        # 它指向的就是这个 exe，路径又没变，没必要再造个硬链接占位。
+        # （硬链接还有个麻烦：删它会走进回收站流程，硬链接经常删不掉。）
+        ok = True
+        print(f"沿用已有的桌面快捷方式：{lnk}")
     else:
         ok = make_hardlink(EXE, legacy)
         print(f"已改用桌面硬链接：{legacy}" if ok else "两种方式都失败了，请手动建快捷方式")
+    if legacy.exists():
+        try:
+            legacy.unlink()
+            print("已清掉旧的硬链接占位：", legacy)
+        except OSError as exc:
+            print(f"（旧的硬链接没清掉，手动删一下：{exc}）")
 
     print()
     print("启动：双击桌面「工作台」")
