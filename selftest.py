@@ -712,9 +712,17 @@ try:
           f"{len(_rest)} + 1 -> {len(_after)}")
 
 finally:
-    # 收尾：库目录与索引都换回真实的那份
+    # 收尾：库目录与索引都换回真实的那份。
+    #
+    # 但「进这一段之前的那份」本身可能是脏的：早先某次自测（在这段隔离逻辑
+    # 写出来之前）往真实索引里塞过 src=test 的假条目，连着一像素黑图。
+    # 直接还原等于把脏数据再写回去 —— 2026-11-18 用户打开首页看到的就是
+    # 一张全黑的图，图名写着「自测图 0」。所以还原时一律剔掉测试条目。
     photos.LIB_DIR = _real_lib
-    store.write_cache("photos", _real_snap)
+    clean = [i for i in _real_snap
+             if i.get("src") != "test"
+             and not str(i.get("id") or "").startswith("_selftest")]
+    store.write_cache("photos", clean)
 
 print("=== 15. 浏览器缓存治理 ===")
 check("有缓存清理清单", len(actions._BROWSER_CACHE_ITEMS) >= 15,
