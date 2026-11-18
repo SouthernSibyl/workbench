@@ -45,6 +45,11 @@ APP_VERSION = "1.0.0"
 RANK_VERSION = 3
 PORT_CANDIDATES = list(range(39217, 39240))
 
+# 快捷启动的防抖表：{启动项 id: 上次受理的时间戳}。
+# 只用于「别让一次点击变成十次进程创建」，不参与任何状态展示。
+_LAUNCH_RECENT: dict[str, float] = {}
+_LAUNCH_GUARD = threading.Lock()
+
 LOCK = threading.RLock()
 STATE: dict = {
     "startedAt": time.time(),
@@ -1222,6 +1227,16 @@ class Handler(BaseHTTPRequestHandler):
             entry = next((l for l in (cfg.get("launchers") or []) if l.get("id") == wanted), None)
             if entry is None:
                 return self._json({"ok": False, "message": "找不到这个启动项"}, 404)
+            # 同一个启动项 6 秒内只受理一次。GUI 程序（尤其 Electron）从
+            # 「进程创建」到「窗口出现」要十几二十秒，这期间用户会反复点 ——
+            # 每次点击都会真的再起一个进程，抢焦点、抢单实例锁，最后全都慢。
+            now = time.time()
+            with _LAUNCH_GUARD:
+                last = _LAUNCH_RECENT.get(wanted, 0.0)
+                if now - last < 6.0:
+                    return self._json({"ok": True, "busy": True,
+                                       "message": "正在启动，稍等一下"})
+                _LAUNCH_RECENT[wanted] = now
             result = actions.launch(cfg, entry)
             store.log(f"launch {wanted}: {result}")
             logbook.get("actions").child("launch").info(

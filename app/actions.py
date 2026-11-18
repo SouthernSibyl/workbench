@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import time
+import urllib.request
 import webbrowser
 from pathlib import Path
 
@@ -13,6 +14,50 @@ import store
 
 CREATE_NO_WINDOW = 0x08000000
 DETACHED = 0x00000008
+
+# 启动别人的程序时，必须从环境里摘掉的变量。
+#
+# `ELECTRON_RUN_AS_NODE=1` 是最要命的一个：Electron 应用（Trae、VS Code、Qoder、
+# WorkBuddy 自己）一旦看到它，就以**纯 Node 运行时**启动 —— 不建窗口、不读
+# resources、不写日志，几十秒后静默退出（退出码 0）。表现就是「点了没反应」，
+# 而且日志里还是「已打开」。
+#
+# 这个变量不是用户设的，是从「启动工作台的那个终端」继承下来的：只要工作台
+# 是从一个 Electron 应用的子进程里起的（比如在某个 IDE 的终端里跑），
+# 它启动的所有 Electron 程序都会变成哑的。2026-11-18 实测：
+#   explorer 双击 → 60MB / 17 线程 / 正常出窗口
+#   带 ELECTRON_RUN_AS_NODE=1 → 32MB / 1 线程 / 20 秒后退出
+#
+# VSCODE_* 是同一族的：VS Code 的 fork 看到 IPC 钩子会以为自己是被某个 IDE
+# 拉起的 CLI 子进程，去连一个不存在的管道然后放弃。
+_STRIP_ENV = frozenset({
+    "ELECTRON_RUN_AS_NODE",
+    "ELECTRON_NO_ATTACH_CONSOLE",
+    "ELECTRON_FORCE_IS_PACKAGED",
+    "VSCODE_IPC_HOOK",
+    "VSCODE_IPC_HOOK_CLI",
+    "VSCODE_IPC_HOOK_EXTHOST",
+    "VSCODE_PID",
+    "VSCODE_CWD",
+    "VSCODE_DEV",
+    "VSCODE_NLS_CONFIG",
+    "VSCODE_CODE_CACHE_PATH",
+    # 启动 .py 启动项时，父进程的 Python 环境会把它带歪
+    "PYTHONHOME",
+    "PYTHONPATH",
+})
+
+
+def clean_env() -> dict:
+    """给「被启动的程序」一份干净的环境变量。
+
+    只摘掉会改变目标程序行为的那几个（见 `_STRIP_ENV`），其余原样传下去 ——
+    用户自己设的代理、PATH、语言设置都还在。
+    """
+    env = dict(os.environ)
+    for key in _STRIP_ENV:
+        env.pop(key, None)
+    return env
 
 
 _EDGE_CANDIDATES = [
@@ -23,15 +68,35 @@ _EDGE_CANDIDATES = [
 ]
 
 
-def _popen(args, cwd: str | None = None) -> None:
-    flags = CREATE_NO_WINDOW
+def _popen(args, cwd: str | None = None) -> subprocess.Popen:
+    """拉起一个 GUI 程序：干净环境 + 独立进程组，不等它。
+
+    `close_fds=True` 之外没什么可做的 —— GUI 程序的创建本身只要几十毫秒，
+    真正的初始化是它自己的事，不该让界面的请求等它。
+    """
     try:
-        subprocess.Popen(args, cwd=cwd or None, creationflags=flags,
-                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                         stderr=subprocess.DEVNULL, close_fds=True)
+        return subprocess.Popen(args, cwd=cwd or None, env=clean_env(),
+                                creationflags=CREATE_NO_WINDOW,
+                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL, close_fds=True)
     except OSError as exc:
         store.log(f"popen failed: {args} -> {exc}")
         raise
+
+
+def _died_immediately(proc: subprocess.Popen, wait: float = 0.45) -> str | None:
+    """等一小会儿看它有没有当场死掉，死了就把退出码报上来。
+
+    只抓「立刻退出」这一种（缺 DLL、路径不对、单实例转发失败）。
+    Electron 冷启动十几秒是正常的，不能等它 —— 那是把「慢」误判成「坏」。
+    """
+    try:
+        code = proc.wait(timeout=wait)
+    except subprocess.TimeoutExpired:
+        return None
+    except Exception:
+        return None
+    return f"程序启动后立刻退出了（退出码 {code}）"
 
 
 # ------------------------------------------------------------------ 通用命令
@@ -45,7 +110,7 @@ def run_shell(command: str, cwd: str = "") -> dict:
     if workdir and not Path(workdir).exists():
         workdir = None
     try:
-        subprocess.Popen(command, cwd=workdir, shell=True,
+        subprocess.Popen(command, cwd=workdir, shell=True, env=clean_env(),
                          creationflags=CREATE_NO_WINDOW,
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL, close_fds=True)
@@ -53,6 +118,48 @@ def run_shell(command: str, cwd: str = "") -> dict:
         store.log(f"run_shell failed: {command} -> {exc}")
         return {"ok": False, "message": f"启动失败：{exc}"}
     return {"ok": True, "message": "已发出启动指令"}
+
+
+# ------------------------------------------------------------------ 本地服务
+
+def _probe_reader(port: int, timeout: float = 0.7) -> str | None:
+    """这个端口上是不是已经跑着我想要的本地服务了。
+
+    「已经在跑就直接打开，别再起一个」—— 重复启动 node 服务会抢端口失败，
+    用户看到的是一个不报错也不打开的按钮。
+    """
+    url = f"http://127.0.0.1:{port}/api/books"
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
+            if resp.status == 200 and b"books" in resp.read(4096):
+                return f"http://127.0.0.1:{port}"
+    except Exception:
+        return None
+    return None
+
+
+_NODE_CANDIDATES = [
+    r"C:\Program Files\nodejs\node.exe",
+    r"C:\Program Files (x86)\nodejs\node.exe",
+]
+
+
+def find_node(node_dir: str = "") -> str | None:
+    if node_dir:
+        cand = Path(node_dir) / "node.exe"
+        if cand.exists():
+            return str(cand)
+    for c in _NODE_CANDIDATES:
+        if Path(c).exists():
+            return c
+    return shutil.which("node")
+
+
+def open_url(url: str) -> None:
+    try:
+        webbrowser.open(url)
+    except Exception as exc:
+        store.log(f"open_url failed: {exc}")
 
 
 # ------------------------------------------------------------------ 统一入口
@@ -67,16 +174,57 @@ def launch(cfg: dict, entry: dict) -> dict:
         return {"ok": True, "message": "已打开"}
     if kind == "shell":
         return run_shell(entry.get("command") or "", entry.get("cwd") or "")
+    if kind in ("node", "ebook"):
+        return launch_node(entry)
     return launch_path(entry.get("path") or entry.get("target") or "",
                        entry.get("args") or "", entry.get("cwd") or "")
+
+
+def launch_node(entry: dict) -> dict:
+    """跑一个本地 node 脚本并打开它的网址（读书站就是这一类）。
+
+    1.0.0 把这套逻辑整段删了（当时的理由是「只有本机有」），
+    结果配置里那条 `kind: ebook` 变成了「这个启动项还没绑定文件」——
+    点得动、看不懂。这里按「通用 node 服务」重新实现：
+    脚本路径、node 目录、端口都从配置读，任何人的 node 项目都能这么配。
+    """
+    port = int(entry.get("port") or 8787)
+    # 只探前后两个端口：读书站这类服务的端口是固定的，21 连探在
+    # 防火墙丢包的机器上要白等十几秒
+    for p in range(port, port + 3):
+        hit = _probe_reader(p)
+        if hit:
+            open_url(hit)
+            return {"ok": True, "message": f"已经在运行（{p}），已为你打开"}
+    script = str(entry.get("server") or "").strip()
+    if not script or not Path(script).exists():
+        return {"ok": False, "message": "找不到要启动的脚本，请重新配置这一项"}
+    node = find_node(str(entry.get("node_dir") or ""))
+    if not node:
+        return {"ok": False, "message": "找不到 node，请重新配置这一项"}
+    args = [node, script]
+    books = str(entry.get("books") or "").strip()
+    if books:
+        args += ["--books", books]
+    args += ["--port", str(port)]
+    try:
+        proc = _popen(args, cwd=str(Path(script).parent))
+    except OSError as exc:
+        return {"ok": False, "message": f"启动失败：{exc}"}
+    dead = _died_immediately(proc, wait=0.9)   # node 起服务比 GUI 快，等久一点
+    if dead:
+        return {"ok": False, "message": dead}
+    open_url(f"http://127.0.0.1:{port}")
+    return {"ok": True, "message": "已启动"}
 
 
 def launch_path(path: str, args: str = "", cwd: str = "") -> dict:
     """打开任意文件 / 程序 / 文件夹 / 快捷方式。
 
-    不带参数时一律交给系统关联去开（os.startfile）——
-    .exe、.lnk、文件夹、文档、图片、视频都能正确处理，
-    比自己解析命令行靠谱得多。
+    可执行文件（exe/cmd/bat/com）走 Popen，其余交给系统关联。
+    以前是「无参数就一律 os.startfile」，那条路有两个必坏的点：
+    `ShellExecute` 不让我们控制环境变量，也不保证工作目录是程序自己那层。
+    而 macOS/Linux 上 os.startfile 根本不存在 —— 那部分是给分发版留的。
     """
     raw = str(path or "").strip().strip('"')
     if not raw:
@@ -87,12 +235,32 @@ def launch_path(path: str, args: str = "", cwd: str = "") -> dict:
 
     arg_list = [a for a in str(args or "").replace(",", " ").split() if a]
     is_prog = p.suffix.lower() in (".exe", ".cmd", ".bat", ".com")
-    if arg_list and is_prog:
+
+    # 可执行文件一律自己拉起来，**不**交给 ShellExecute。
+    # 两个原因（2026-11-18 实测）：
+    #   1. ShellExecute 用调用者的环境变量 —— 父进程里若有 ELECTRON_RUN_AS_NODE=1，
+    #      Trae / VS Code 这类会被启动成纯 Node 进程：不建窗口、不写日志，
+    #      20 秒后安静退出，界面还显示「已打开」。
+    #   2. ShellExecute 的默认工作目录是调用者的 cwd，不是程序自己那层。
+    # 这两条都是「点了没反应」的成因，而不带参数恰恰是最常见的用法。
+    if is_prog:
+        if p.suffix.lower() in (".cmd", ".bat"):
+            # 批处理不是 PE 文件，CreateProcess 直接拉起会 193 报错，
+            # 必须先过 cmd.exe。/c 执行完就退，不等脚本里 start 出去的东西。
+            try:
+                _popen(["cmd", "/c", str(p), *arg_list], cwd or str(p.parent))
+            except OSError as exc:
+                return {"ok": False, "message": f"启动失败：{exc}"}
+            return {"ok": True, "message": f"已执行 {p.name}"}
         try:
-            _popen([str(p), *arg_list], cwd or str(p.parent))
+            proc = _popen([str(p), *arg_list], cwd or str(p.parent))
         except OSError as exc:
             return {"ok": False, "message": f"启动失败：{exc}"}
+        dead = _died_immediately(proc)
+        if dead:
+            return {"ok": False, "message": dead}
         return {"ok": True, "message": f"已启动 {p.name}"}
+
     try:
         os.startfile(str(p))            # noqa: S606 —— Windows 专用，走系统关联
     except OSError as exc:
@@ -242,7 +410,8 @@ def open_window(url: str, width: int = 1380, height: int = 880) -> dict:
         if profile and "msedge" in exe.lower():
             args.append(f"--user-data-dir={profile}")
         try:
-            proc = subprocess.Popen(args, creationflags=CREATE_NO_WINDOW,
+            proc = subprocess.Popen(args, env=clean_env(),
+                                    creationflags=CREATE_NO_WINDOW,
                                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                     stderr=subprocess.DEVNULL, close_fds=True)
             return {"exe": exe, "pid": proc.pid, "fallback": False}

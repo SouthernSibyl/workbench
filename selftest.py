@@ -10,6 +10,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -1265,6 +1266,33 @@ check("清洗后只留有内容的", len(_clean) == 3, [e["title"] for e in _cle
 check("老配置按 command 认成 shell", _clean[0]["kind"] == "shell")
 check("空 path 被丢弃", all(e.get("path") or e.get("command") or e.get("url") for e in _clean))
 check("id 不重复", len({e["id"] for e in _clean}) == len(_clean))
+
+# --- 启动时的环境隔离（2026-11-18）---
+# 症状：点 Trae 没反应，日志里却写着「已打开」。实测带 ELECTRON_RUN_AS_NODE=1
+# 时 Electron 程序会变成纯 Node 进程：32MB、1 线程、不建窗口、20 秒后退出。
+os.environ.update(ELECTRON_RUN_AS_NODE="1", VSCODE_IPC_HOOK_CLI="\\\\.\\pipe\\x")
+_env = actions.clean_env()
+os.environ.pop("ELECTRON_RUN_AS_NODE", None)
+os.environ.pop("VSCODE_IPC_HOOK_CLI", None)
+check("启动别人的程序时摘掉 ELECTRON_RUN_AS_NODE",
+      "ELECTRON_RUN_AS_NODE" not in _env)
+check("也摘掉 VSCODE_IPC_HOOK_CLI", "VSCODE_IPC_HOOK_CLI" not in _env)
+check("别的东西照常传下去（PATH 还在）", "PATH" in _env or "Path" in _env)
+
+# 立刻退出的程序要能当场报错，而不是回一句「已启动」
+_tmp_exe = Path(tempfile.mkdtemp(prefix="wb-launch-"))
+_boom = _tmp_exe / "boom.exe"
+_boom.write_bytes(b"MZ" + b"\x00" * 200)      # 假 PE：CreateProcess 会失败或立刻退出
+_r = actions.launch_path(str(_boom))
+check("起不来的程序不会谎报成功", _r.get("ok") is False, _r)
+
+_quiet = _tmp_exe / "quiet.cmd"
+_quiet.write_text("@echo off\r\nexit /b 0\r\n", encoding="utf-8")
+_r2 = actions.launch_path(str(_quiet))
+check("批处理走 cmd /c 而不是直接 CreateProcess", _r2.get("ok") is True, _r2)
+
+check("路径不存在时明说文件不在了",
+      actions.launch_path(str(_tmp_exe / "nope.exe")).get("ok") is False)
 
 print("=== 19. 启动项接口 + 跨站拦截 ===")
 _before = len(json.loads(get("/api/launchers")[1])["launchers"])

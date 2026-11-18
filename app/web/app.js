@@ -1740,14 +1740,26 @@
   /* ---------------------------------------------------------- 动作 */
 
   async function launch(item, node) {
+    // 已经在启动就别再点：Trae / VS Code 这类冷启动要十几二十秒，
+    // 900ms 就把卡片恢复成可点状态，用户会以为没反应，于是点第二次、第三次
+    // —— 2026-11-18 的日志里，同一个程序被点了 9 次。
+    if (node.classList.contains('busy')) return;
+    const sub = node.querySelector('.lac-sub');
+    const oldSub = sub ? sub.textContent : '';
     node.classList.add('busy');
+    if (sub) sub.textContent = '启动中…';
+    let hold = 1500;
     try {
       const r = await api('/api/launch', { method: 'POST', body: JSON.stringify({ id: item.id }) });
       toast(r.message || (r.ok ? '已启动' : '启动失败'), r.ok ? '' : 'warn');
+      if (r.ok) hold = 6000;          // 先按住 6 秒，别让人连点
     } catch (e) {
       toast('调用失败：' + e.message, 'warn');
     } finally {
-      setTimeout(() => node.classList.remove('busy'), 900);
+      setTimeout(() => {
+        node.classList.remove('busy');
+        if (sub && sub.isConnected && sub.textContent === '启动中…') sub.textContent = oldSub;
+      }, hold);
     }
   }
 
