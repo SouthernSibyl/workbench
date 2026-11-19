@@ -1496,6 +1496,78 @@ finally:
     _bm._cache = None
     _bm._mtime = 0.0
 
+
+print("=== 20. 简报简述：按标题贴，不按位置 ===")
+# 2026-11-20 的实际事故：导出「待补简述」之后，列表被排序迁移重排了一遍，
+# 收回时按 index 贴回 —— 10 条简述整整齐齐地贴到了别人的标题下面。
+# 现在按标题匹配，index 只作兜底。
+import tempfile as _tf2
+from pathlib import Path as _P2
+
+_tmp_exp = _P2(_tf2.mkdtemp(prefix="wb-expand-"))
+_old_cache_dir = store.CACHE_DIR
+store.CACHE_DIR = _tmp_exp
+_iso = "2026-13-01"
+_exp_cache = {"news": {"rankVersion": 3, "items": [
+    {"title": "丙", "summary": "", "summaryBy": "local"},
+    {"title": "甲", "summary": "", "summaryBy": "local"},
+    {"title": "乙", "summary": "", "summaryBy": "local"},
+]}}
+store.write_cache(f"daily-{_iso}", _exp_cache)
+# 导出时的顺序是 甲/乙/丙，收回时缓存已经变成 丙/甲/乙
+(_tmp_exp / f"expand-{_iso}.json").write_text(json.dumps(
+    {"requests": [{"index": 0, "title": "甲"},
+                  {"index": 1, "title": "乙"},
+                  {"index": 2, "title": "丙"}]}, ensure_ascii=False), encoding="utf-8")
+_big = lambda who: who + "的正文。" + "内容" * 60
+_exp_ans = {"summaries": [
+    {"index": 0, "text": _big("甲")},
+    {"index": 1, "text": _big("乙")},
+    {"index": 2, "text": _big("丙")},
+]}
+_exp_src = str(_tmp_exp / f"expand-answer-{_iso}.json")
+(_tmp_exp / f"expand-answer-{_iso}.json").write_text(
+    json.dumps(_exp_ans, ensure_ascii=False), encoding="utf-8")
+try:
+    _r_exp = ai.ingest_expand({"news": {}}, {"iso": _iso}, _exp_ans, src=_exp_src)
+    _after = store.read_cache(f"daily-{_iso}")["news"]["items"]
+    check("列表重排过也能按标题贴对",
+          all((it["summary"] or "").startswith(it["title"] + "的正文") for it in _after),
+          [(it["title"], (it["summary"] or "")[:8]) for it in _after])
+    check("收回条数与导出条数一致", len(_r_exp["saved"]) == 3, _r_exp["saved"])
+    check("返回里带上贴到了哪条（便于核对）",
+          all(x.get("title") for x in _r_exp["saved"]), _r_exp["saved"])
+finally:
+    store.CACHE_DIR = _old_cache_dir
+
+
+print("=== 21. 简述补齐：模型写过的不动 ===")
+# ensure_summaries 的注释一直写着「模型写的不动」，但代码是按字数判的：
+# ai 版不足 300 字就被本地拼的短句覆盖。2026-11-20 一次启动把 10 条
+# 500-600 字的模型简述全换成了 90 字的本地版。
+_tmp_sum = _P2(_tf2.mkdtemp(prefix="wb-sum-"))
+_old_cd2 = store.CACHE_DIR
+store.CACHE_DIR = _tmp_sum
+_iso2 = "2026-13-02"
+_short_ai = "模型写的短摘要。" * 8          # 约 64 字，远低于 300
+store.write_cache(f"daily-{_iso2}", {"news": {"items": [
+    {"title": "模型写过的", "summary": _short_ai, "summaryBy": "ai",
+     "points": ["要点"], "source": "x", "cat": "科技"},
+    {"title": "还空着的", "summary": "", "summaryBy": "",
+     "points": ["要点一", "要点二"], "source": "y", "cat": "科技"},
+]}})
+try:
+    _r_sum = ai.ensure_summaries({"news": {}}, {"iso": _iso2})
+    _after2 = store.read_cache(f"daily-{_iso2}")["news"]["items"]
+    check("模型写的短摘要不被本地版覆盖",
+          _after2[0]["summary"] == _short_ai and _after2[0]["summaryBy"] == "ai",
+          f"{len(_after2[0]['summary'])} 字 / {_after2[0]['summaryBy']}")
+    check("空的那条仍然被补上",
+          bool((_after2[1].get("summary") or "").strip()), _after2[1].get("summaryBy"))
+    check("统计口径对得上", _r_sum.get("ai") == 1 and _r_sum.get("filled") == 1, _r_sum)
+finally:
+    store.CACHE_DIR = _old_cd2
+
 # 所有 HTTP 测试都跑完了，这时候才收服务
 try:
     srv.shutdown()

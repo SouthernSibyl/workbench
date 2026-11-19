@@ -15,6 +15,7 @@ import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor as _TPE
+from pathlib import Path
 
 import rank
 import store
@@ -1088,25 +1089,48 @@ def generate_summary(cfg: dict, item: dict, target: int | None = None) -> str:
 _CACHE_LOCK = threading.RLock()
 
 
+def _norm_title(s: str) -> str:
+    """标题归一化：去掉所有空白、统一小写。
+
+    全角半角不动 —— 模型基本是照抄标题的，动多了反而对不上。
+    """
+    return "".join(str(s or "").split()).lower()
+
+
 def save_summary(cfg: dict, ctx: dict, index: int, text: str,
-                 by: str = "ai") -> dict:
-    """把某一条的简述写回当天缓存（并发安全）。"""
+                 by: str = "ai", want_title: str = "") -> dict:
+    """把某一条的简述写回当天缓存（并发安全）。
+
+    `want_title` 非空时**先按标题找**，找不到才用 index。原因：
+    index 是「位置」，不是「身份」—— 导出待补条目和收回答案之间，
+    列表可能被排序迁移重排过（RANK_VERSION 换代），index 就指向别人了。
+    2026-11-20 的简报就是这么错位的：10 条简述全贴到了别人的标题下面。
+    """
     key = f"daily-{ctx['iso']}"
     cpm = int((cfg.get("news") or {}).get("chars_per_minute") or 400)
     with _CACHE_LOCK:
         payload = store.read_cache(key) or {}
         news = payload.get("news") or {}
         items = news.get("items") or []
-        if index < 0 or index >= len(items):
-            return {}
-        items[index]["summary"] = text
-        items[index]["summaryBy"] = by
-        items[index]["mins"] = max(1, round(len(text) / cpm, 1))
-        items[index]["stub"] = False
+        pos = -1
+        t = _norm_title(want_title)
+        if t:
+            for i, it in enumerate(items):
+                if _norm_title(it.get("title")) == t:
+                    pos = i
+                    break
+        if pos < 0:
+            if index < 0 or index >= len(items):
+                return {}
+            pos = index
+        items[pos]["summary"] = text
+        items[pos]["summaryBy"] = by
+        items[pos]["mins"] = max(1, round(len(text) / cpm, 1))
+        items[pos]["stub"] = False
         news["items"] = items
         payload["news"] = news
         store.write_cache(key, payload)
-        return items[index]
+        return items[pos]
 
 
 def expand_item(cfg: dict, ctx: dict, index: int,
@@ -1145,7 +1169,12 @@ def ensure_summaries(cfg: dict, ctx: dict) -> dict:
     """把当天所有条目的简述补齐：本地重排，零成本、不失败。
 
     这是「稳定预生成」的那一半 —— 每天缓存一落地，每条都有一个能读的简述，
-    用户点开任意一条都不用等。模型写的（summaryBy=ai）不动，只补缺口。
+    用户点开任意一条都不用等。
+
+    **模型写过的一律不动。** 以前这里是「不合格就重写」，而"合格"的线是
+    `is_real_summary` 的字数阈值（ai 版要 300 字）。模型写了 280 字是它的
+    判断，不该被本地拼的 90 字冲掉 —— 那不是补缺口，是降级。
+    2026-11-20 实测：一次启动把 10 条 500-600 字的模型简述全换成了本地版。
     """
     key = f"daily-{ctx['iso']}"
     with _CACHE_LOCK:
@@ -1155,21 +1184,23 @@ def ensure_summaries(cfg: dict, ctx: dict) -> dict:
             return {"filled": 0, "total": 0, "ai": 0, "local": 0}
         filled = ai_n = local_n = 0
         for i, it in enumerate(items):
-            if is_real_summary(it, cfg):
-                if summary_by(it) == "ai":
-                    ai_n += 1
-                else:
-                    local_n += 1
+            by = summary_by(it)
+            # 模型写过的：只要有正文就保留，短也是它写的
+            if by == "ai" and (it.get("summary") or "").strip():
+                ai_n += 1
                 continue
-            text, by = compose_summary(cfg, it)
+            if is_real_summary(it, cfg):
+                local_n += 1
+                continue
+            text, how = compose_summary(cfg, it)
             if not text:
                 continue
             items[i]["summary"] = text
-            items[i]["summaryBy"] = by
+            items[i]["summaryBy"] = how
             items[i]["mins"] = max(1, round(len(text) / cpm_of(cfg)))
             items[i]["stub"] = False
             filled += 1
-            if by == "local":
+            if how == "local":
                 local_n += 1
         if filled:
             payload.setdefault("news", {})["items"] = items
@@ -1212,13 +1243,37 @@ def expand_requests(cfg: dict, ctx: dict) -> list[dict]:
     return out
 
 
-def ingest_expand(cfg: dict, ctx: dict, obj: dict) -> dict:
+def _expand_title_map(src: str, iso: str) -> dict[int, str]:
+    """读导出时留下的「index → 标题」映射。
+
+    导出文件（`expand-<date>.json`）和收回文件放在同一个目录里，
+    所以从收回文件的路径就能推出它。读不到就返回空 —— 那时候退回
+    按 index 匹配，至少不比以前更差。
+    """
+    if not src:
+        return {}
+    try:
+        p = Path(src).with_name(f"expand-{iso}.json")
+        obj = json.loads(p.read_text(encoding="utf-8"))
+        return {int(r["index"]): str(r.get("title") or "")
+                for r in (obj.get("requests") or []) if "index" in r}
+    except Exception:
+        return {}
+
+
+def ingest_expand(cfg: dict, ctx: dict, obj: dict, src: str = "") -> dict:
     """把外部写好的简述收进缓存：{"summaries": [{"index": n, "text": "…"}]}。
+
+    **按标题贴，不按 index。** index 只是导出那一刻的位置：如果中间
+    列表被重排过（排序算法换代、新条目插入），index 就指向别人了。
+    2026-11-20 就是这样，10 条简述整整齐齐地贴错了 10 条。
+    优先用导出文件里的映射，其次用返回里自带的 title，最后才退回 index。
 
     逐条校验：index 必须在范围内、正文清洗后不少于 80 字，否则跳过并记账 ——
     宁缺勿烂，坏条目不会把好缓存冲掉。
     """
     raws = (obj or {}).get("summaries") or (obj or {}).get("items") or []
+    titles = _expand_title_map(src, str(ctx.get("iso") or ""))
     saved, skipped = [], []
     for one in raws if isinstance(raws, list) else []:
         if not isinstance(one, dict):
@@ -1233,9 +1288,11 @@ def ingest_expand(cfg: dict, ctx: dict, obj: dict) -> dict:
         if len(text) < 80:
             skipped.append(f"第 {idx} 条太短（{len(text)} 字）")
             continue
-        got = save_summary(cfg, ctx, idx, text, by="ai")
+        want = titles.get(idx) or str(one.get("title") or "")
+        got = save_summary(cfg, ctx, idx, text, by="ai", want_title=want)
         if got:
-            saved.append({"index": idx, "chars": len(text)})
+            saved.append({"index": idx, "chars": len(text),
+                          "title": str(got.get("title") or "")[:40]})
         else:
             skipped.append(f"第 {idx} 条越界")
     store.log(f"ingest_expand: 收下 {len(saved)} 条，跳过 {len(skipped)} 条"

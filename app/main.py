@@ -906,7 +906,7 @@ def dump_expand(out_dir: str | None = None) -> int:
             "count": len(reqs),
             "requests": reqs,
             "answerTo": str(out / f"expand-answer-{ctx['iso']}.json"),
-            "answerShape": '{"summaries": [{"index": 0, "text": "……"}, ...]}',
+            "answerShape": '{"summaries": [{"index": 0, "title": "这条的标题（照抄）", "text": "……"}, ...]}',
         }, ensure_ascii=False, indent=1), encoding="utf-8")
         store.log(f"dump_expand: {ctx['iso']} 有 {len(reqs)} 条待写，已写到 {path}")
         print(str(path))
@@ -922,7 +922,7 @@ def ingest_expand_once(src: str) -> int:
         obj = json.loads(Path(src).read_text(encoding="utf-8"))
         cfg = store.load_config()
         ctx = calendar_cn.today_context(None, cfg.get("anniversaries") or [])
-        res = ai.ingest_expand(cfg, ctx, obj)
+        res = ai.ingest_expand(cfg, ctx, obj, src=src)
         print(json.dumps(res, ensure_ascii=False))
         return 0 if res.get("ok") else 1
     except Exception:
